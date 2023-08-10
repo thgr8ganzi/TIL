@@ -80,5 +80,34 @@
 
 ### 파일서버
 
+* 다양한 HTTP 메서드를 처리하는 함수를 저장하기 위해 method 객체를 사용한다.
+* 요청 핸들러의 프로미스가 거부되면 catch 호출에서는 오류를 응답객체로 변환하고 돌려보낼수 있다.
+* 응답내용의 status 필드는 생략될수 있으며 기본값은 200이다.
+* body값이 읽을수 있는 스트림일경우 쓰기가능한 스트림으로 전달하는데 사용하는 pipe 메서드를 갖는다.
 * 
+```
+const {createServer} = require('http');
+
+const methods = Object.create(null);
+
+createServer((request, response) => {
+    let handler = methods[request.method] || notAllowed;
+    handler(request)
+        .catch(error => {
+            if(error.status != null) return error;
+            return {body: String(error), status: 500};
+        })
+        .then(({body, status = 200, type = "text/plain"}) => {
+            response.writeHead(status, {"Content-Type": type});
+            if(body && body.pipe) body.pipe(response);
+            else response.end(body);
+        });
+}).listen(8000);
+async function notAllowed(request) {
+    return {
+        status: 405,
+        body: `Method ${request.method} not allowed.`
+    };
+}
+```
 
