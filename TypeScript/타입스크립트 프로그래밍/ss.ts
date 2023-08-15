@@ -1,9 +1,6 @@
-type ResultType = [boolean, string]
-const doSomething = (): ResultType => {
-    try {
-        throw new Error('some error occurs...')
-    }catch (e){
-        return [false, e.message]
+class Container<T>{
+    constructor(public value: T) {
     }
 }
-const [result, errorMessage] = doSomething();
+let numberContainer: Container<number> = new Container<number>(1);
+let stringContainer: Container<string> = new Container<string>('Hello world');
