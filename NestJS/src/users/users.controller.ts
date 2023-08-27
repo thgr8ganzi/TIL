@@ -1,4 +1,20 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete, Res, HttpCode, NotFoundException, Header, Redirect, Query, BadRequestException } from '@nestjs/common';
+import {
+    Controller,
+    Get,
+    Post,
+    Body,
+    Patch,
+    Param,
+    Delete,
+    Res,
+    HttpCode,
+    NotFoundException,
+    Header,
+    Redirect,
+    Query,
+    BadRequestException,
+    ParseIntPipe, HttpStatus
+} from '@nestjs/common';
 import { CreateUserDto } from './dto/create-user.dto';
 import {VerifyEmailDto} from "./dto/verify-email.dto";
 import {UserLoginDto} from "./dto/user-login.dto";
@@ -29,4 +45,5 @@ export class UsersController {
     async getUserInfo(@Param('id') userId: string): Promise<UserInfo> {
         return await this.usersService.getUserInfo(userId);
     }
+
 }
