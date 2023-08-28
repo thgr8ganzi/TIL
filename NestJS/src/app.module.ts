@@ -15,6 +15,7 @@ import {TypeOrmModule} from "@nestjs/typeorm";
 import {LoggerMiddleware} from "./logger/logger.middleware";
 import {Logger2Middleware} from "./logger/logger2.middleware";
 import {UsersController} from "./users/users.controller";
+import { AuthModule } from './auth/auth.module';
 
 @Module({
   controllers: [ApiController, AppController],
@@ -40,6 +41,7 @@ import {UsersController} from "./users/users.controller";
           migrations: [__dirname + '/**/migrations/*.js'], // 3
           migrationsTableName: 'migrations', // 4
       }),
+      AuthModule,
   ],
 })
 export class AppModule implements NestModule {
