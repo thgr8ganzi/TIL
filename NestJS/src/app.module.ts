@@ -1,12 +1,5 @@
 import {MiddlewareConsumer, Module, NestModule} from '@nestjs/common';
-import {AppController} from './app.controller';
-import {AppService} from './app.service';
-import {ApiController} from './api/api.controller';
 import {UsersModule} from './users/users.module';
-import {BaseService} from "./base-service";
-import {ServiceA} from "./service-A";
-import {ServiceB} from "./service-B";
-import { EmailModule } from './email/email.module';
 import {ConfigModule, ConfigService} from "@nestjs/config";
 import * as process from "process";
 import emailConfig from "./config/emailConfig";
@@ -15,16 +8,14 @@ import {TypeOrmModule} from "@nestjs/typeorm";
 import {LoggerMiddleware} from "./logger/logger.middleware";
 import {Logger2Middleware} from "./logger/logger2.middleware";
 import {UsersController} from "./users/users.controller";
-import { AuthModule } from './auth/auth.module';
+import authConfig from "./config/authConfig";
 
 @Module({
-  controllers: [ApiController, AppController],
-  providers: [AppService, BaseService, ServiceA, ServiceB, ConfigService],
   imports: [
       UsersModule,
       ConfigModule.forRoot({
         envFilePath: [`${__dirname}/config/env/.${process.env.NODE_ENV}.env`],
-        load: [emailConfig],
+        load: [emailConfig, authConfig],
         isGlobal: true,
         validationSchema,
       }),
@@ -41,13 +32,8 @@ import { AuthModule } from './auth/auth.module';
           migrations: [__dirname + '/**/migrations/*.js'], // 3
           migrationsTableName: 'migrations', // 4
       }),
-      AuthModule,
   ],
+  controllers: [],
+  providers: [],
 })
-export class AppModule implements NestModule {
-    configure(consumer: MiddlewareConsumer): any {
-        consumer
-            .apply(LoggerMiddleware, Logger2Middleware)
-            .forRoutes(UsersController)
-    }
-}
+export class AppModule {}
