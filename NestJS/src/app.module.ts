@@ -9,10 +9,30 @@ import {LoggerMiddleware} from "./logger/logger.middleware";
 import {Logger2Middleware} from "./logger/logger2.middleware";
 import {UsersController} from "./users/users.controller";
 import authConfig from "./config/authConfig";
+import {AppService} from "./app.service";
+import {AppController} from "./app.controller";
+import {LoggerModule} from "./logging/logger.module";
+import * as winston from 'winston';
+import {
+    utilities as nestWinstonModuleUtilities,
+    WinstonModule,
+} from 'nest-winston';
 
 @Module({
   imports: [
       UsersModule,
+      WinstonModule.forRoot({
+          transports: [
+              new winston.transports.Console({
+                  level: process.env.NODE_ENV === 'production' ? 'info' : 'silly',
+                  format: winston.format.combine(
+                      winston.format.colorize(),
+                      winston.format.timestamp(),
+                      nestWinstonModuleUtilities.format.nestLike('MyApp', { prettyPrint: true }),
+                  ),
+              }),
+          ],
+      }),
       ConfigModule.forRoot({
         envFilePath: [`${__dirname}/config/env/.${process.env.NODE_ENV}.env`],
         load: [emailConfig, authConfig],
@@ -33,7 +53,7 @@ import authConfig from "./config/authConfig";
           migrationsTableName: 'migrations', // 4
       }),
   ],
-  controllers: [],
-  providers: [],
+  controllers: [AppController],
+  providers: [AppService],
 })
 export class AppModule {}

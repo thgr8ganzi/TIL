@@ -1,4 +1,15 @@
-import { Body, Controller, Get, Param, Post, Query, Headers, UseGuards } from '@nestjs/common';
+import {
+    Body,
+    Controller,
+    Get,
+    Param,
+    Post,
+    Query,
+    Headers,
+    UseGuards,
+    Inject,
+    InternalServerErrorException, LoggerService, Logger
+} from '@nestjs/common';
 import { AuthGuard } from 'src/auth.guard';
 import { AuthService } from 'src/auth/auth.service';
 import { CreateUserDto } from './dto/create-user.dto';
@@ -6,16 +17,21 @@ import { UserLoginDto } from './dto/user-login.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 import { UserInfo } from './UserInfo';
 import { UsersService } from './users.service';
+import {WINSTON_MODULE_NEST_PROVIDER, WINSTON_MODULE_PROVIDER} from "nest-winston";
+import {Logger as WinstonLogger} from "winston";
 
 @Controller('users')
 export class UsersController {
     constructor(
         private usersService: UsersService,
+        // @Inject(WINSTON_MODULE_NEST_PROVIDER)private readonly logger: LoggerService,
+        @Inject(Logger)private readonly logger:LoggerService
     ) { }
 
     @Post()
     async createUser(@Body() dto: CreateUserDto): Promise<void> {
         const { name, email, password } = dto;
+        this.printWinstonLog(dto);
         await this.usersService.createUser(name, email, password);
     }
 
@@ -42,5 +58,17 @@ export class UsersController {
     @Get(':id')
     async getUserInfo(@Headers() headers: any, @Param('id') userId: string): Promise<UserInfo> {
         return this.usersService.getUserInfo(userId);
+    }
+
+    private printWinstonLog(dto: CreateUserDto) {
+        try {
+            throw new InternalServerErrorException('test');
+        } catch (e) {
+            this.logger.error('error: ' + JSON.stringify(dto), e.stack);
+        }
+        this.logger.warn('warn: ' + JSON.stringify(dto));
+        this.logger.log('log: ' + JSON.stringify(dto));
+        this.logger.verbose('verbose: ' + JSON.stringify(dto));
+        this.logger.debug('debug: ' + JSON.stringify(dto));
     }
 }
