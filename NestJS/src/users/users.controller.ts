@@ -8,7 +8,7 @@ import {
     Headers,
     UseGuards,
     Inject,
-    InternalServerErrorException, LoggerService, Logger
+    InternalServerErrorException, LoggerService, Logger, BadRequestException
 } from '@nestjs/common';
 import { AuthGuard } from 'src/auth.guard';
 import { AuthService } from 'src/auth/auth.service';
@@ -27,6 +27,13 @@ export class UsersController {
         // @Inject(WINSTON_MODULE_NEST_PROVIDER)private readonly logger: LoggerService,
         @Inject(Logger)private readonly logger:LoggerService
     ) { }
+
+    @Get(':id')
+    findOne(@Param('id')id: string){
+        if(+id < 1){
+            throw new BadRequestException()
+        }
+    }
 
     @Post()
     async createUser(@Body() dto: CreateUserDto): Promise<void> {

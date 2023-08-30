@@ -5,6 +5,8 @@ import { EmailModule } from 'src/email/email.module';
 import { UserEntity } from './entity/user.entity';
 import { UsersController } from './users.controller';
 import { UsersService } from './users.service';
+import {APP_FILTER} from "@nestjs/core";
+import {HttpExceptionFilter} from "../exception/http-exception.filter";
 
 @Module({
     imports: [

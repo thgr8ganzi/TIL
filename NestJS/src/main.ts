@@ -7,6 +7,7 @@ import {
   utilities as nestWinstonModuleUtilities, WINSTON_MODULE_PROVIDER,
   WinstonModule,
 } from 'nest-winston';
+import {HttpExceptionFilter} from "./exception/http-exception.filter";
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {

@@ -17,6 +17,7 @@ import {
     utilities as nestWinstonModuleUtilities,
     WinstonModule,
 } from 'nest-winston';
+import {ExceptionModule} from "./exception/exception.module";
 
 @Module({
   imports: [
@@ -52,6 +53,7 @@ import {
           migrations: [__dirname + '/**/migrations/*.js'], // 3
           migrationsTableName: 'migrations', // 4
       }),
+      ExceptionModule,
   ],
   controllers: [AppController],
   providers: [AppService],
