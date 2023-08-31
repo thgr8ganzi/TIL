@@ -54,6 +54,7 @@ import {ExceptionModule} from "./exception/exception.module";
           migrationsTableName: 'migrations', // 4
       }),
       ExceptionModule,
+      LoggerModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -7,8 +7,6 @@ import {
   utilities as nestWinstonModuleUtilities, WINSTON_MODULE_PROVIDER,
   WinstonModule,
 } from 'nest-winston';
-import {HttpExceptionFilter} from "./exception/http-exception.filter";
-import {LoggingInterceptor} from "./LoggingInterceptor";
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -27,7 +25,6 @@ async function bootstrap() {
   app.useGlobalPipes(new ValidationPipe({
     transform: true,
   }));
-  app.useGlobalInterceptors(new LoggingInterceptor())
   await app.listen(3000);
 }
 bootstrap();

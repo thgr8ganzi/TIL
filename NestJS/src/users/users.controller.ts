@@ -24,16 +24,9 @@ import {Logger as WinstonLogger} from "winston";
 export class UsersController {
     constructor(
         private usersService: UsersService,
-        // @Inject(WINSTON_MODULE_NEST_PROVIDER)private readonly logger: LoggerService,
         @Inject(Logger)private readonly logger:LoggerService
     ) { }
 
-    @Get(':id')
-    findOne(@Param('id')id: string){
-        if(+id < 1){
-            throw new BadRequestException()
-        }
-    }
 
     @Post()
     async createUser(@Body() dto: CreateUserDto): Promise<void> {
@@ -69,7 +62,7 @@ export class UsersController {
 
     private printWinstonLog(dto: CreateUserDto) {
         try {
-            throw new InternalServerErrorException('test');
+
         } catch (e) {
             this.logger.error('error: ' + JSON.stringify(dto), e.stack);
         }
