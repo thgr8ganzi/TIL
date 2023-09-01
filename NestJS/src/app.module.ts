@@ -19,6 +19,10 @@ import {
 } from 'nest-winston';
 import {ExceptionModule} from "./exception/exception.module";
 import { BatchModule } from './batch/batch.module';
+import {TerminusModule} from "@nestjs/terminus";
+import { HealthCheckController } from './health-check/health-check.controller';
+import {HttpModule} from "@nestjs/axios";
+import { HealthCheckModule } from './health-check/health-check.module';
 
 @Module({
   imports: [
@@ -57,6 +61,7 @@ import { BatchModule } from './batch/batch.module';
       ExceptionModule,
       LoggerModule,
       BatchModule,
+      HealthCheckModule,
   ],
   controllers: [AppController],
   providers: [AppService],
