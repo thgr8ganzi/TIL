@@ -18,6 +18,7 @@ import {
     WinstonModule,
 } from 'nest-winston';
 import {ExceptionModule} from "./exception/exception.module";
+import { BatchModule } from './batch/batch.module';
 
 @Module({
   imports: [
@@ -55,6 +56,7 @@ import {ExceptionModule} from "./exception/exception.module";
       }),
       ExceptionModule,
       LoggerModule,
+      BatchModule,
   ],
   controllers: [AppController],
   providers: [AppService],
