@@ -19,20 +19,27 @@ import { UserInfo } from './UserInfo';
 import { UsersService } from './users.service';
 import {WINSTON_MODULE_NEST_PROVIDER, WINSTON_MODULE_PROVIDER} from "nest-winston";
 import {Logger as WinstonLogger} from "winston";
+import {CommandBus, QueryBus} from "@nestjs/cqrs";
+import {CreateUserCommand} from "./command/create-user.command";
+import {GetUserInfoQuery} from "./query/get-user-info.query";
 
 @Controller('users')
 export class UsersController {
     constructor(
         private usersService: UsersService,
-        @Inject(Logger)private readonly logger:LoggerService
+        @Inject(Logger)private readonly logger:LoggerService,
+        private commandBus: CommandBus,
+        private queryBus: QueryBus,
     ) { }
 
 
     @Post()
     async createUser(@Body() dto: CreateUserDto): Promise<void> {
         const { name, email, password } = dto;
-        this.printWinstonLog(dto);
-        await this.usersService.createUser(name, email, password);
+        const command = new CreateUserCommand(name, email, password);
+        return  this.commandBus.execute(command)
+        // this.printWinstonLog(dto);
+        // await this.usersService.createUser(name, email, password);
     }
 
     @Post('/email-verify')
@@ -47,17 +54,13 @@ export class UsersController {
         return await this.usersService.login(email, password);
     }
 
-    // @Get(':id')
-    // async getUserInfo(@Headers() headers: any, @Param('id') userId: string): Promise<UserInfo> {
-    //   const jwtString = headers.authorization.split('Bearer ')[1];
-    //   this.authService.verify(jwtString);
-    //   return this.usersService.getUserInfo(userId);
-    // }
-
     @UseGuards(AuthGuard)
     @Get(':id')
     async getUserInfo(@Headers() headers: any, @Param('id') userId: string): Promise<UserInfo> {
-        return this.usersService.getUserInfo(userId);
+        const getUserInfoQuery = new GetUserInfoQuery(userId);
+
+        return this.queryBus.execute(getUserInfoQuery)
+        // return this.usersService.getUserInfo(userId);
     }
 
     private printWinstonLog(dto: CreateUserDto) {
