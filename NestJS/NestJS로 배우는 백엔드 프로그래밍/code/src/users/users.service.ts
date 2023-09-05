@@ -5,8 +5,8 @@ import { Injectable, InternalServerErrorException, NotFoundException, Unprocessa
 import { InjectRepository } from '@nestjs/typeorm';
 import { UserInfo } from './UserInfo';
 import { UserEntity } from './entity/user.entity';
-import { AuthService } from 'src/auth/auth.service';
-import { EmailService } from 'src/email/email.service';
+import { AuthService } from 'NestJS/NestJS로 배우는 백엔드 프로그래밍/code/src/auth/auth.service';
+import { EmailService } from 'NestJS/NestJS로 배우는 백엔드 프로그래밍/code/src/email/email.service';
 
 @Injectable()
 export class UsersService {

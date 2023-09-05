@@ -10,8 +10,8 @@ import {
     Inject,
     InternalServerErrorException, LoggerService, Logger, BadRequestException
 } from '@nestjs/common';
-import { AuthGuard } from 'src/auth.guard';
-import { AuthService } from 'src/auth/auth.service';
+import { AuthGuard } from 'NestJS/NestJS로 배우는 백엔드 프로그래밍/code/src/auth.guard';
+import { AuthService } from 'NestJS/NestJS로 배우는 백엔드 프로그래밍/code/src/auth/auth.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UserLoginDto } from './dto/user-login.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
