@@ -58,3 +58,50 @@ function fn(n){
 }
 console.log(fn(5));
 /*===========*/
+// 1.16
+function isEven(n) {
+    return n % 2 === 0;
+}
+
+function square(x) {
+    return x * x;
+}
+
+function fastExpt(b, n) {
+    function iter(result, base, exp) {
+        if (exp === 0) {
+            return result;
+        } else if (isEven(exp)) {
+            return iter(result, square(base), exp / 2);
+        } else {
+            return iter(result * base, base, exp - 1);
+        }
+    }
+
+    return iter(1, b, n);
+}
+
+console.log(fastExpt(3, 4)); // 81
+
+/*===========*/
+function gdc(a, b){
+    return b === 0 ? a : gdc(b, a % b);
+}
+
+console.log(gdc(16, 28));
+
+/*===========*/
+function smallest_divisor(n){
+    return find_divisor(n, 2);
+}
+function find_divisor(n, test_divisor){
+    return square(test_divisor) > n
+        ? n
+        : divides(test_divisor, n)
+        ? test_divisor
+        : find_divisor(n, test_divisor + 1);
+}
+function divides(a, b){
+    return b % a === 0;
+}
+console.log(smallest_divisor(199));
