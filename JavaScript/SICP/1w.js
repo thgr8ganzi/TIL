@@ -63,9 +63,6 @@ function isEven(n) {
     return n % 2 === 0;
 }
 
-function square(x) {
-    return x * x;
-}
 
 function fastExpt(b, n) {
     function iter(result, base, exp) {
@@ -94,6 +91,9 @@ console.log(gdc(16, 28));
 function smallest_divisor(n){
     return find_divisor(n, 2);
 }
+function square(x) {
+    return x * x;
+}
 function find_divisor(n, test_divisor){
     return square(test_divisor) > n
         ? n
@@ -105,3 +105,5 @@ function divides(a, b){
     return b % a === 0;
 }
 console.log(smallest_divisor(199));
+console.log(smallest_divisor(1999));
+console.log(smallest_divisor(19999));
