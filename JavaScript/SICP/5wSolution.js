@@ -25,4 +25,7 @@ function reverse(list) {
 }
 // console.log(reverse(list(1, 4, 9, 16, 25)));
 // 2.20
+const plus_curried = x => y => x + y;
+const brooks = (curriedFunc, args) => args.reduce((acc, curr) => acc(curr), curriedFunc);
+console.log(brooks(plus_curried, list(3, 4)))
 
