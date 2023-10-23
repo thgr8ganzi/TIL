@@ -9,8 +9,11 @@ function list(...elements) {
     const [x, ...y] = elements;
     return pair(x, list(...y));
 }
+function lastPair(list) {
+    return isNull(list) ? null : lastPair(tail(list) || head(list));
+}
 let myList = list(23, 72, 149, 34);
-// console.log(myList);
+console.log(myList);
 // 2.18
 function reverse(list) {
     function reverseIter(list, reversed) {
@@ -23,9 +26,16 @@ function reverse(list) {
     }
     return reverseIter(list, null);
 }
-// console.log(reverse(list(1, 4, 9, 16, 25)));
+console.log(reverse(list(1, 4, 9, 16, 25)));
 // 2.20
-const plus_curried = x => y => x + y;
-const brooks = (curriedFunc, args) => args.reduce((acc, curr) => acc(curr), curriedFunc);
+function plus_curried(x) {
+    return y => x + y;
+}
+function brooks(f, args) {
+    return args.reduce((a, b) => {
+        console.log(a)
+        console.log(b)
+    });
+}
 console.log(brooks(plus_curried, list(3, 4)))
 
