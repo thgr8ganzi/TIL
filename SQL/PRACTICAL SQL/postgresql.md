@@ -29,4 +29,4 @@ VALUES ('Janet', 'Smith', 'F.D. Roosevelt HS', '2011-10-30', 36200),
        ('Kathleen', 'Roush', 'F.D Roosevelt HS', '2010-10-22', 38500)
 ```
 * `INSERT INTO <테이블명> (<컬럼명>, ...) VALUES (<값>, ...);` : 테이블에 데이터 삽입
-* 
+
