@@ -72,6 +72,7 @@ function print_queue(queue) {
     display(front_ptr(queue));
     display(rear_ptr(queue));
 }
+
 // 3.24
 
 // 3.28
