@@ -44,3 +44,8 @@
 
 * Apache Kafka
   * <a href="https://github.com/thgr8ganzi/TIL/tree/master/Kafka">Kafka</a>
+
+### Computer Science
+
+* 자격증
+  * <a href="https://github.com/thgr8ganzi/TIL/tree/master/CS/%EC%A0%95%EC%B2%98%EA%B8%B0">정처기</a>
