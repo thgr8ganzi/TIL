@@ -1,0 +1,40 @@
+# curl -XPUT "http://localhost:9200/_snapshot/javacafe" -H "Content-Type: application/json" -d '{
+#  "type": "fs",
+#  "settings": {
+#    "location": "/es/book_backup/search_example",
+#    "compress": true
+#  }
+#}'
+PUT http://localhost:9200/_snapshot/javacafe
+Content-Type: application/json
+
+{
+  "type": "fs",
+  "settings": {
+    "location": "/es/book_backup/search_example",
+    "compress": true
+  }
+}
+
+###
+
+# curl -XPUT "http://localhost:9200/_snapshot/apache-web-log" -H "Content-Type: application/json" -d '{
+#  "type": "fs",
+#  "settings": {
+#    "location": "/es/book_backup/agg_example",
+#    "compress": true
+#  }
+#}'
+PUT http://localhost:9200/_snapshot/apache-web-log
+Content-Type: application/json
+
+{
+  "type": "fs",
+  "settings": {
+    "location": "/es/book_backup/agg_example",
+    "compress": true
+  }
+}
+
+###
+
