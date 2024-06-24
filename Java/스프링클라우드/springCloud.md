@@ -159,3 +159,29 @@
 * MSA
   * 서비스간 결합도를 낮추어 변화에 능동적으로 대응
   * 각 독립된 서비스가 노출된 REST API 사용
+
+### Spring Cloud
+
+* 마이크로 서비스 아키텍처를 지원하기 위한것
+* 스프링 클라우드를 사용하면 환경설정,서비스 검색, 회복성, 프록시 등등 다양한 기능을 제공
+* Centralized Configuration
+  * 서비스들의 환경설정을 중앙에서 관리
+  * spring cloud config
+* location transparency
+  * 서비스 검색
+  * spring cloud eureka
+* load balancing
+  * 서비스간의 부하분산
+  * spring cloud ribbon
+  * spring cloud gateway
+* Easier REST clients
+  * REST API 호출을 쉽게
+  * spring cloud openfeign
+* Visibility and Monitoring
+  * 모니터링
+  * spring cloud sleuth
+  * spring cloud zipkin
+* Fault Tolerance
+  * 회복성
+  * spring cloud hystrix
+  * spring cloud resilience4j
