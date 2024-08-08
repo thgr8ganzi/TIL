@@ -42,3 +42,15 @@ public interface StoreClient {
 * API Gateway
 * 서비스 디스커버리 클라이언트와 연동하여 서비스를 찾아서 라우팅
 * spring boot 2.4 부터 사용X
+
+### filter
+
+* predicate filter
+  * 라우팅 전에 요청을 변경
+* pre filter
+  * 라우팅 전에 요청을 변경
+* post filter
+  * 라우팅 후에 응답을 변경
+* gateway handler mapping
+  * 라우팅 정보를 가지고 있음
+* property, java code 로 변경가능
