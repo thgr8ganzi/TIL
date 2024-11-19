@@ -167,4 +167,122 @@
 #### 공정한 경쟁
 * oracle 의 터치 카운트 알고리즘과 비슷
 * 매우짧은 순간 특정 버퍼를 여러번 액세스 하더라고 해당 숫자 이상으로 카운트 하지 않아 공정한 경쟁이 일어난다.
-* Postgresql 은 clock sweep 알고리즘이 최대 6차례 순회하기 전에 다시 엑세스 하지 않는다면 victim 으로 선정되고 
+* Postgresql 은 clock sweep 알고리즘이 최대 6차례 순회하기 전에 다시 엑세스 하지 않는다면 victim 으로 선정된다.
+
+### bulk io 를 위한 io 전략과 ring buffer
+
+* seq scan 으로 큰테이블의 모든 블록이 shared buffer 에 로딩되면 shared buffer 가 가득차서 disk read 가 발생
+* 이문제를 방지하기 위하여 io 전략과 ring buffer 를 사용
+
+#### io 전략
+
+* io 전략은 io 유형에 따라 다르게 동작하는것으로 postgresql 은 4가지 io 유형으로 구분
+```
+typedef enum BufferAccessStrategyType
+{
+    BAS_NORMAL,                 /* nomarl random access */
+    BAS_BULKREAD,               /* large read-only scan */
+    BAS_BULKWRITE,              /* large multi-block write */
+    BAS_VACUUM                  /* VACUUM */
+} BufferAccessStrategyType;
+```
+* normal 요청을 제외한 모든 요청은 ring buffer 를 사용
+
+#### ring buffer
+ 
+* 논리적으로 원형 형태의 배열
+* 일절 크기의 배열을 순환하는 방식으로 shared buffer 내에 존재하여 seq scan 으로 인한 disk read 를 방지
+* ring buffer 크기는 io 유형에 따라 다르다
+```
+switch (btype)
+{
+    case BAS_NORMAL:
+        return NULL;
+    case BAS_BULKREAD:
+        ring_size = 256 * 1024 / BLCKSZ;
+        break;
+    case BAS_BULKWRITE:
+        ring_size = 16 * 1024 * 1024 / BLCKSZ;
+        break;
+    case BAS_VACUUM:
+        ring_size = 256 * 1024 / BLCKSZ;
+        break;
+}
+```
+
+##### bulk read
+
+* shared buffer 크기의 1/4 이상인 테이블에 대한 seq scan 시 bulk read 로 처리
+* 이때 테이블 크기는 통계정보 사용
+* bulk read 를 통한 ring buffer 의 크기는 256kib(32블록) 로 설정
+```
+create extension pg_buffercache;
+
+create table b1(c1 char(1000), c2 char(1000));
+
+insert into public.b1 select i, i from generate_series(1, 35000) a(i);
+
+analyze b1;
+
+select relname, relpages, relpages * 8192/1024/1024 as size
+from pg_class where relname = 'b1';
+
+select count(*)
+from b1;
+
+select count(*)
+from b1
+union all
+select count(*)
+from b1;
+
+select count(*) as buffer
+from pg_buffercache a, pg_class b
+where a.relfilenode = pg_relation_filenode(b.oid)
+and a.reldatabase in (0, (select oid from pg_database where datname = current_database()))
+and b.relname = 'b1';
+-- 32블록씩 증가
+```
+
+##### ring buffer 위험성
+
+* bulk read 시 shared buffer 에 한번에 적재하여 테이블 액세스 효율을 높인다
+* 자주 사용시 shared buffer 가 가득차서 disk read 가 발생할수 있음
+* 테이블 크기가 shared buffer 1/4 보다 커지면 해당 테이블에 대한 seq scan 은 bulk read 방식으로 처리되어 효율 떨어짐
+```
+create table s1(c1 char(1000), c2 char(1000));
+
+insert into s1 select i, i from generate_series(1, 32000) a(i);
+
+analyze s1;
+
+select relname, relpages, relpages * 8192/1024/1024 as size
+from pg_class where relname = 's1';
+
+create or replace function loop_fullscan(v_begin integer, v_end integer)
+returns void as $$
+declare
+rval integer;
+begin
+    for i in v_begin..v_end loop
+        select count(*) from s1 into rval;
+    end loop;
+end;
+$$ language plpgsql;
+
+select loop_fullscan(1, 100);
+
+insert into s1 select * from s1 limit 1000;
+analyze s1;
+```
+
+#### pg_prewarm extension
+
+```
+create extension pg_prewarm;
+
+select pg_prewarm('s1');
+
+select loop_fullscan(1, 100);
+```
+* pg_prewarm 을 사용하여 쿼리 성능을 높일수 있음
