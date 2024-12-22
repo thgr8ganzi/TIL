@@ -568,3 +568,335 @@ std_typanalyze(VacAttrStats *stats)
   * 실제 실행 결과를 통해 통계 정보가 지속적으로 업데이트됩니다 
   * ANALYZE 작업이 주기적으로 실행되어 통계 정보를 갱신합니다 
   * 이를 통해 시간이 지날수록 더 정확한 예측이 가능해집니다
+
+### Explain 도구
+<hr/>
+
+* 쿼리 실행계획을 확인하는 도구
+* 실행쿼리의 문제점과 성능상에 문제가 되는 수행단계를 확인가능 - 쿼리 튜닝의 시작
+```
+drop table t1;
+drop table t2;
+
+create table t1 (c1 int, c2 int);
+create table t2 (c1 int, c2 char(100));
+
+insert into t1
+select i, mod(i, 100) + 1 from generate_series(1, 10000) a(i);
+
+insert into t2
+select mod(generate_series(1, 1000000), 10000) + 1, 'dummy';
+
+analyse t1;
+analyse t2;
+```
+
+#### Explain 사용모드
+<hr/>
+
+##### 예측모드
+
+* 실제 수행은 하지 않고 예상 실행 계획 제공
+* 쿼리앞에 explain 붙이면 예측모드로 실행
+```
+explain select * from t2;
+
++------------------------------------------------------------+
+|QUERY PLAN                                                  |
++------------------------------------------------------------+
+|Seq Scan on t2  (cost=0.00..27242.00 rows=1000000 width=105)|
++------------------------------------------------------------+
+```
+
+##### 실행모드
+
+* 실제 수행을 한 후 실행 계획, 수행시간, IO 블록수를 제공
+* DML 수행시 데이터 변경에 주의
+* DML 에 explain analyze 를 보고싶으면 '\set AUTOCOMMIT off' 사용, 테스트 후 rollback 수행
+* explain analyze 를 사용하면 단계별 수행시간, 쿼리 파싱 시간, 전체 수행시간 제공, 쿼리결과 미제공
+```
+explain analyse select * from t2;
+
++-------------------------------------------------------------------------------------------------------------+
+|QUERY PLAN                                                                                                   |
++-------------------------------------------------------------------------------------------------------------+
+|Seq Scan on t2  (cost=0.00..27242.00 rows=1000000 width=105) (actual time=0.589..93.057 rows=1000000 loops=1)|
+|Planning Time: 4.611 ms                                                                                      |
+|Execution Time: 138.595 ms                                                                                   |
++-------------------------------------------------------------------------------------------------------------+
+```
+
+###### IO 블록수 확인방법
+
+* BUFFERS 옵션을 사용해서 IO 블록수 확인
+```
+explain (analyse, buffers) select * from t2;
+
++-------------------------------------------------------------------------------------------------------------+
+|QUERY PLAN                                                                                                   |
++-------------------------------------------------------------------------------------------------------------+
+|Seq Scan on t2  (cost=0.00..27242.00 rows=1000000 width=105) (actual time=0.144..84.215 rows=1000000 loops=1)|
+|  Buffers: shared hit=16146 read=1096                                                                        |
+|Planning Time: 0.036 ms                                                                                      |
+|Execution Time: 136.381 ms                                                                                   |
++-------------------------------------------------------------------------------------------------------------+
+```
+
+##### 결과 분석 방법
+
+```
++------------------------------------------------------------------------------------------------------------------+
+|QUERY PLAN                                                                                                        |
++------------------------------------------------------------------------------------------------------------------+
+|Gather  (cost=1000.00..23460.33 rows=100 width=105) (actual time=4.385..73.079 rows=100 loops=1)                  |
+|  Workers Planned: 2                                                                                              |
+|  Workers Launched: 2                                                                                             |
+|  Buffers: shared hit=16065 read=1177                                                                             |
+|  ->  Parallel Seq Scan on t2  (cost=0.00..22450.33 rows=42 width=105) (actual time=1.665..40.880 rows=33 loops=3)|
+|        Filter: (c1 = 1)                                                                                          |
+|        Rows Removed by Filter: 333300                                                                            |
+|        Buffers: shared hit=16065 read=1177                                                                       |
+|Planning:                                                                                                         |
+|  Buffers: shared hit=5                                                                                           |
+|Planning Time: 0.065 ms                                                                                           |
+|Execution Time: 73.133 ms                                                                                         |
++------------------------------------------------------------------------------------------------------------------+
+```
+* start up cost : 쿼리 수행 시작 비용
+  * 첫번째 레코드를 fetch 하는데 드는 비용
+  * 1000.00
+* total cost : 쿼리 수행 총 비용
+  * 전체 레코드를 fetch 하는데 드는 비용
+  * 23460.33
+* actual time : 실제 수행시간
+  * 첫번째 레코드를 fetch 하는데 걸린 시간, 전체 레코드를 fetch 하는데 걸린 시간 을 제공
+  * 단위는 milliseconds(1/1000초)
+  * 4.385..73.079
+* 예츨 로우와 실제 로우
+  * 예측 로우는 옵티마이저가 통계 정보를 이용해서 계산한값
+  * 예측 로우와 실제 로우의 차이가 크다면 옵티마이저의 판단이 잘못되었을 가능성이 크다
+  * 예측 로우(Estimate cardinality) : 100
+  * 실제 로우(Actual cardinality) : 100
+* width, Loops
+  * width : 레코드의 평균 길이
+  * pg_stat 의 avg_width 칼럼을 합산한값 : 105
+  * loops : 오퍼레이션의 반복수행 횟수: 1
+```
+select attname, avg_width from pg_stats where tablename = 't2';
++-------+---------+
+|attname|avg_width|
++-------+---------+
+|c1     |4        |
+|c2     |101      |
++-------+---------+
+```
+* filter
+  * rows removed by filter : 필터 조건에 해당하지 않는 로우수
+  * 333300
+  * 처리건수에 비해 많은 레코드가 필터조건에 의해 버려질때 인덱스 생성 고려
+  * 인덱스 생성후 다시 실행계획 시 remove by filter 가 없어짐
+```
+create index t2_idx01 on t2(c1);
++-------------------------------------------------------------------------------------------------------------------+
+|QUERY PLAN                                                                                                         |
++-------------------------------------------------------------------------------------------------------------------+
+|Bitmap Heap Scan on t2  (cost=5.20..383.60 rows=100 width=105) (actual time=0.037..0.163 rows=100 loops=1)         |
+|  Recheck Cond: (c1 = 1)                                                                                           |
+|  Heap Blocks: exact=100                                                                                           |
+|  Buffers: shared hit=103                                                                                          |
+|  ->  Bitmap Index Scan on t2_idx01  (cost=0.00..5.17 rows=100 width=0) (actual time=0.020..0.020 rows=100 loops=1)|
+|        Index Cond: (c1 = 1)                                                                                       |
+|        Buffers: shared hit=3                                                                                      |
+|Planning Time: 0.096 ms                                                                                            |
+|Execution Time: 0.184 ms                                                                                           |
++-------------------------------------------------------------------------------------------------------------------+
+```
+* index cond : 인덱스 엑세스 조건
+* recheck cond : 초기 인덱스 스캔 후 실제 데이터에 대해 조건을 다시 확인하는 과정
+* buffer : io 횟수
+  * shared read : 디스크 read 횟수
+  * shared hit : 메모리 read 횟수
+  * dirtied : 메모리 read 시 읽은 더티블록 수
+  * written : 디스크로 기록한 더티 블록수
+* planning time, execution time
+  * planning time : 쿼리 파싱 시간
+  * execution time : 쿼리 수행 시간
+  * 쿼리 실행시간에 쿼리 파싱은 포함하지 않는다
+  * 총 2가지를 더한 시간이 쿼리 실행시간
+
+#### 실행계획 읽는 방법
+
+* 원칙
+  1. 안쪽부터 읽는다.
+  2. 조인시에는 outer 테이블이 위에 위치를 차지한다.
+
+##### 원칙 1 : 안쪽부터 읽는다.
+```
+drop table t1;
+
+create table t1 (c1 int, dummy char(1000));
+
+insert into t1 select mod(i, 1000) + 1, 'dummy' from generate_series(1, 10000) a(i);
+
+create index t1_idx01 on t1(c1);
+analyse t1;
+
+explain select * from t1 where c1 between 1 and 10;
++-----------------------------------------------------------------------+
+|QUERY PLAN                                                             |
++-----------------------------------------------------------------------+
+|(2)Bitmap Heap Scan on t1  (cost=5.48..363.91 rows=117 width=1008)        |
+|  Recheck Cond: ((c1 >= 1) AND (c1 <= 10))                                |
+|(1)  ->  Bitmap Index Scan on t1_idx01  (cost=0.00..5.46 rows=117 width=0)|
+|        Index Cond: ((c1 >= 1) AND (c1 <= 10))                            |
++-----------------------------------------------------------------------+
+```
+* (1) -> (2) 순서로 읽는다.
+
+##### 원칙 2 : 조인시에는 outer 테이블이 위에 위치를 차지한다.
+
+* 조인순서를 파악할떄 매우 중요
+* 오라클은 먼저 엑세스 되는 테이블을 위에 위치 시킨다.
+
+|조인방법|   outer 테이블   |  inner 테이블  | 먼저 엑세스 되는 테이블 |
+|:-----:|:-------------:|:-----------:|:-------------:|
+|NL 조인 | Driving 테이블 | Inner 테이블 |  Outer 테이블  |
+|Merge 조인 |  두번째 소팅 테이블   | 첫번째 소팅 테이블  |  Inner 테이블  |
+|Hash 조인 |  Probe 테이블   | Build 테이블   |  Inner 테이블  |
+
+##### NL 조인
+
+```
+drop table t1;
+drop table t2;
+create table t1 (c1 int, dummy char(1000));
+create table t2 (c1 int, dummy char(1000));
+insert into t1 select generate_series(1, 10), 'dummy';
+insert into t2 select generate_series(1, 10000), 'dummy';
+
+create index t2_idx01 on t2(c1);
+
+analyse t1;
+analyse t2;
+
+set enable_mergejoin = off;
+set enable_hashjoin = off;
+
+explain select * from t1, t2 where t1.c1 = t2.c1;
++--------------------------------------------------------------------------+
+|QUERY PLAN                                                                |
++--------------------------------------------------------------------------+
+|Nested Loop  (cost=0.29..81.22 rows=10 width=2016)                        |
+|(1)-> Seq Scan on t1  (cost=0.00..2.10 rows=10 width=1008)                |
+|(2)-> Index Scan using t2_idx01 on t2  (cost=0.29..7.90 rows=1 width=1008)|
+|        Index Cond: (c1 = t1.c1)                                          |
++--------------------------------------------------------------------------+
+```
+* (1) -> (2) 순서로 읽는다.
+* outer 테이블 t1 을 seq scan
+* 1단계에서 리턴된 레코드 마다 t2_idx01 인덱스를 이용하여 inner 테이블 t2 에 엑세스
+```
+drop table t3;
+create table t3 (c1 int, dummy char(1000));
+insert into t3 select generate_series(1, 10000), 'dummy';
+create index t3_idx01 on t3(c1);
+analyse t3;
+explain select * from t1 a, t2 b, t3 c where a.c1 = b.c1 and b.c1 = c.c1;
++----------------------------------------------------------------------------------+
+|QUERY PLAN                                                                        |
++----------------------------------------------------------------------------------+
+|Nested Loop  (cost=0.57..90.21 rows=10 width=3024)                                |
+|  Join Filter: (c.c1 = a.c1)                                                      |
+|(3)-> Nested Loop  (cost=0.29..81.22 rows=10 width=2016)                          |
+|(1)     ->  Seq Scan on t1 a  (cost=0.00..2.10 rows=10 width=1008)                |
+|(2)     ->  Index Scan using t2_idx01 on t2 b  (cost=0.29..7.90 rows=1 width=1008)|
+|              Index Cond: (c1 = a.c1)                                             |
+|(4)-> Index Scan using t3_idx01 on t3 c  (cost=0.29..0.89 rows=1 width=1008)      |
+|        Index Cond: (c1 = b.c1)                                                   |
++----------------------------------------------------------------------------------+
+```
+* 3개 테이블 조인시 (1) -> (2) -> (3) -> (4) 순서로 읽는다.
+* outer 테이블 t1 을 seq scan
+* t2_idx01 인덱스를 이용하여 inner 테이블 t2 에 엑세스
+* NL 결과가 outer 데이터 소스가 됨
+* 리턴된 레코드 마다 t3_idx01 인덱스를 이용하여 inner 테이블 t3 에 엑세스
+
+##### Hash 조인
+
+```
+set enable_nestloop = off;
+set enable_hashjoin = on;
+explain select * from t1, t2 where t1.c1 = t2.c1;
++----------------------------------------------------------------+
+|QUERY PLAN                                                      |
++----------------------------------------------------------------+
+|Hash Join  (cost=2.23..1568.82 rows=10 width=2016)              |
+|  Hash Cond: (t2.c1 = t1.c1)                                    |
+|(3)-> Seq Scan on t2  (cost=0.00..1529.00 rows=10000 width=1008)|
+|(2)-> Hash  (cost=2.10..2.10 rows=10 width=1008)                |
+|(1)     ->  Seq Scan on t1  (cost=0.00..2.10 rows=10 width=1008)|
++----------------------------------------------------------------+
+```
+* (1) -> (2) -> (3) 순서로 읽는다.
+* 옵티마이저가 작은 테이블인 t1 을 hash 테이블로 만들고 스캔
+* t2 를 스캔하면서 hash 테이블과 조인
+* t1 에 대한 hash 테이블을 만든다
+* probe 테이블인 t2 를 스캔하면서 hash 테이블과 조인
+```
+explain select * from t1 a, t2 b, t3 c where a.c1 = b.c1 and b.c1 = c.c1;
++------------------------------------------------------------------------------+
+|QUERY PLAN                                                                    |
++------------------------------------------------------------------------------+
+|Hash Join  (cost=1568.95..3135.55 rows=10 width=3024)                         |
+|  Hash Cond: (c.c1 = a.c1)                                                    |
+|(6)-> Seq Scan on t3 c  (cost=0.00..1529.00 rows=10000 width=1008)            |
+|(5)-> Hash  (cost=1568.82..1568.82 rows=10 width=2016)                        |
+|(4)     ->  Hash Join  (cost=2.23..1568.82 rows=10 width=2016)                |
+|              Hash Cond: (b.c1 = a.c1)                                        |
+|(3)           ->  Seq Scan on t2 b  (cost=0.00..1529.00 rows=10000 width=1008)|
+|(2)           ->  Hash  (cost=2.10..2.10 rows=10 width=1008)                  |
+|(1)                 ->  Seq Scan on t1 a  (cost=0.00..2.10 rows=10 width=1008)|
++------------------------------------------------------------------------------+
+```
+* (1) -> (2) -> (3) -> (4) -> (5) -> (6) 순서로 읽는다.
+* 가장 작은 테이블 t1 을 hash 테이블로 만들고 스캔
+* t1 해시 작업 수행
+* probe 테이블 t2 를 스캔하면서
+* 해시 조인 수행
+* 해시 조인 결과에 대한 해시작업 수행
+* probe 테이블 t3 를 스캔하면서 해시 조인
+
+##### Merge 조인
+
+```
+set enable_nestloop = off;
+set enable_hashjoin = off;
+set enable_mergejoin = on;
+explain select * from t1, t2 where t1.c1 = t2.c1;
++---------------------------------------------------------------------------------+
+|QUERY PLAN                                                                       |
++---------------------------------------------------------------------------------+
+|Merge Join  (cost=2.55..4.43 rows=10 width=2016)                                 |
+|  Merge Cond: (t2.c1 = t1.c1)                                                    |
+|  ->  Index Scan using t2_idx01 on t2  (cost=0.29..1702.29 rows=10000 width=1008)|
+|  ->  Sort  (cost=2.27..2.29 rows=10 width=1008)                                 |
+|        Sort Key: t1.c1                                                          |
+|        ->  Seq Scan on t1  (cost=0.00..2.10 rows=10 width=1008)                 |
++---------------------------------------------------------------------------------+
+```
+```
+explain select * from t1 a, t2 b, t3 c where a.c1 = b.c1 and b.c1 = c.c1;
++-----------------------------------------------------------------------------------------+
+|QUERY PLAN                                                                               |
++-----------------------------------------------------------------------------------------+
+|Merge Join  (cost=2.84..6.57 rows=10 width=3024)                                         |
+|  Merge Cond: (a.c1 = c.c1)                                                              |
+|  ->  Merge Join  (cost=2.55..4.43 rows=10 width=2016)                                   |
+|        Merge Cond: (b.c1 = a.c1)                                                        |
+|        ->  Index Scan using t2_idx01 on t2 b  (cost=0.29..1702.29 rows=10000 width=1008)|
+|        ->  Sort  (cost=2.27..2.29 rows=10 width=1008)                                   |
+|              Sort Key: a.c1                                                             |
+|              ->  Seq Scan on t1 a  (cost=0.00..2.10 rows=10 width=1008)                 |
+|  ->  Index Scan using t3_idx01 on t3 c  (cost=0.29..1702.29 rows=10000 width=1008)      |
++-----------------------------------------------------------------------------------------+
+```
