@@ -900,3 +900,27 @@ explain select * from t1 a, t2 b, t3 c where a.c1 = b.c1 and b.c1 = c.c1;
 |  ->  Index Scan using t3_idx01 on t3 c  (cost=0.29..1702.29 rows=10000 width=1008)      |
 +-----------------------------------------------------------------------------------------+
 ```
+
+### 쿼리 파싱
+
+* 쿼리 실행 순서는 파싱, 쿼리 재작성, 옵티마이징, 실행으로 나눌수 있다.
+* 파싱단계
+  * 문법 체크
+    * 오타 및 분법 점검 체크
+  * 의미 체크
+    * 테이블 존재여부, 권한여부 체크
+  * 쿼리 재작성
+  * 쿼리 최적화
+  * 쿼리 실행
+* postgresql 은 shared pool 이 없는 대신 backend 프로세스가 sql 정보를 저장
+
+#### plan caching
+
+* 재작성된 query tree 를 backend 프로세스에 저장 하는것
+* 쿼리 최적화 단계에서 생성되는 plan tree 는 저장하지 않는다.
+* 문법 체크, 의미체크, 쿼리 재작성 단계는 건너뛰지만 쿼리 최적화 단계는 항상 수행
+
+#### plan caching 동작 원리
+
+* plan caching 대상은 prepare statement 와 function 이다.
+* literal sql 은 plan caching 대상이 아니다.
