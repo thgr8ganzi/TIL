@@ -924,3 +924,296 @@ explain select * from t1 a, t2 b, t3 c where a.c1 = b.c1 and b.c1 = c.c1;
 
 * plan caching 대상은 prepare statement 와 function 이다.
 * literal sql 은 plan caching 대상이 아니다.
+* prepare statement 는 명령어 수행 시점에 재작성된 query tree 를 backend 프로세스에 저장
+* 이후 execute statement 명령어를 수행하면 문접 체크, 구문체크, 쿼리 재작성 단계를 건너뛰고 최적화 단계를 수행한다.
+* 쿼리 최적화 단계 수행 전에 오브젝트 변경, 통계 정보 변경등을 점검하는 revalidation 과정을 수행한다.
+* 매번 쿼리 최적화 단계를 수행한다.
+* 단점은 쿼리 최적화 시간 소요
+* 장점은 bind peeking 이 가능하다.
+
+#### prepare 단계
+
+* 문법체크
+* creteCachedPlan 함수 호출
+* 의미 체크
+* 쿼리 재작성
+* completeCachedPlan 함수 호출
+* saveCachedPlan 함수 호출
+* 재작성된 query tree 를 backend 프로세스에 저장
+
+#### execute 단계
+
+* executeQuery 함수 호출
+* getCachedPlan 함수 호출
+* 재작성된 query tree 를 가져옴
+* revalidation 과정 수행
+* buildCachedPlan 함수 호출
+* 쿼리 최적화 단계 수행
+```postgresql
+drop table t1;
+create table t1 (c1 char(1), c2 date);
+
+insert into t1 select 'T', to_date('20250106', 'YYYYMMDD') + mod(i, 30) from generate_series(1, 1000000) a(i);
+insert into t1 select 'F', to_date('20250106', 'YYYYMMDD') + mod(i, 30) from generate_series(1, 100) a(i);
+
+create index t1_c1 on t1(c1);
+create index t1_c2 on t1(c2);
+
+analyse t1;
+analyse t2;
+
+prepare stmt1(char) as select count(*) from t1 where c1 = $1;
+```
+```
++-----------------------------------------------------------------------------------+
+|QUERY PLAN                                                                         |
++-----------------------------------------------------------------------------------+
+|Finalize Aggregate  (cost=11676.77..11676.78 rows=1 width=8)                       |
+|  ->  Gather  (cost=11676.55..11676.76 rows=2 width=8)                             |
+|        Workers Planned: 2                                                         |
+|        ->  Partial Aggregate  (cost=10676.55..10676.56 rows=1 width=8)            |
+|              ->  Parallel Seq Scan on t1  (cost=0.00..9634.85 rows=416680 width=0)|
+|                    Filter: (c1 = 'T'::bpchar)                                     |
++-----------------------------------------------------------------------------------+
+```
+```postgresql
+prepare stmt2(char, char) as select count(*) from t1 where c2 between to_date($1, 'YYYYMMDD') and to_date($2, 'YYYYMMDD');
+
+explain execute stmt2('20250106', '20250115');
+```
+```
++---------------------------------------------------------------------------------------------------------------------------------------------+
+|QUERY PLAN                                                                                                                                   |
++---------------------------------------------------------------------------------------------------------------------------------------------+
+|Finalize Aggregate  (cost=7132.12..7132.13 rows=1 width=8)                                                                                   |
+|  ->  Gather  (cost=7131.90..7132.11 rows=2 width=8)                                                                                         |
+|        Workers Planned: 2                                                                                                                   |
+|        ->  Partial Aggregate  (cost=6131.90..6131.91 rows=1 width=8)                                                                        |
+|              ->  Parallel Index Only Scan using t1_c2 on t1  (cost=0.43..5789.47 rows=136972 width=0)                                       |
+|                    Index Cond: ((c2 >= to_date('20250106'::text, 'YYYYMMDD'::text)) AND (c2 <= to_date('20250115'::text, 'YYYYMMDD'::text)))|
++---------------------------------------------------------------------------------------------------------------------------------------------+
+```
+* postgresql 은 모든 경우 bind peeking 을 수행 함으로 히스토그램 정보를 참조해서 실행계획 수립
+
+#### literal sql vs bind sql 성능차이
+
+```postgresql
+drop table t1;
+drop table t2;
+create table t1 (c1 integer, c2 integer);
+create table t2 (c1 integer);
+
+\timing on
+do $$
+    declare i integer;
+        begin
+            for i in 1..1000000 loop
+                execute 'update t1 set c2=c2+1 where c1='||i||' and exists (select 1 from t2 where t2.c1=t1.c1)';
+            end loop;
+        end;
+$$;
+
+47 s 256 ms 후 완료
+```
+```postgresql
+\timing on
+do $$
+    declare i integer;
+        begin
+            for i in 1..1000000 loop
+                update t1 set c2=c2+1 where c1=i and exists(select 1 from t2 where t2.c1=t1.c1);
+            end loop;
+        end;
+$$;
+
+6 s 967 ms 후 완료
+```
+
+### 액세스 방법
+<hr/>
+
+* 쿼리 튜닝에 있어서 중요한 3가지는 액세스 방법, 조인 방법, 조인순서이다
+
+#### seq scan
+<hr/>
+
+* 테이블을 full scan 하는 방법
+* 인덱스가 존재하지 않거나 존재하더라도 읽어야 할 범위가 넓은 경우에 선택
+* 테이블 크기에 따라 bulk read 전략을 사용하고 이때 ring buffer 를 사용
+
+#### index scan
+<hr/>
+
+* leaf 블록에 저장된 키를 이용해서 테이블 레코드를 액세스 하는 방법
+* 인덱스 키 순서대로 출력
+* 레코드 정렬 상태에 따라서 테이블 블록 액세스 횟수가 달라짐
+```postgresql
+drop table t1;
+create table t1 (a int, dummy char(100));
+insert into t1 select generate_series(1, 58000), 'dummy';
+create index t1_a on t1(a);
+analyse t1;
+
+explain (costs false, analyze, buffers)
+select * from t1 where a between 1 and 4000;
+```
+```
++------------------------------------------------------------------------+
+|QUERY PLAN                                                              |
++------------------------------------------------------------------------+
+|Index Scan using t1_a on t1 (actual time=0.019..2.076 rows=4000 loops=1)|
+|  Index Cond: ((a >= 1) AND (a <= 4000))                                |
+|  Buffers: shared hit=72 read=9                                         |
+|Planning:                                                               |
+|  Buffers: shared hit=3                                                 |
+|Planning Time: 0.093 ms                                                 |
+|Execution Time: 2.329 ms                                                |
++------------------------------------------------------------------------+
+```
+
+#### bitmap index scan
+<hr/>
+
+* 테이블 랜덤 액세스 횟수를 줄이기 위해 고안된 방식
+* 옵티마이저가 index scan 과 bitmap index scan 방식을 선택하는 기준은 인덱스 칼럼의 correlation 이다.
+* 인덱스와 테이블간 정렬 관계가 불량한 경우 사용
+* 액세스할 테이블 블록들을 블록 번호 순으로 정렬후 액세스
+* 테이블 랜덤 액세스 횟수가 크게 줄어들고 테이블 블록은 1번씩만 액세스 하게 된다.
+* 테이블 블록 번호순으로 액세스 하므로 인덱스 키 순서대로 출력되지 않는다.
+```postgresql
+drop table t1;
+create table t1 (c1 int, dummy char(100));
+
+do $$
+  begin
+    for i in 1..1000 loop
+            for j in 0..57 loop
+                    insert into t1 values (i + (j*1000), 'dummy');
+              end loop;
+      end loop;
+  end$$;
+
+create index t1_c1 on t1(c1);
+analyse t1;
+
+select relpages, reltuples from pg_class where relname = 't1';
+
++--------+---------+
+|relpages|reltuples|
++--------+---------+
+|1000    |58000    |
++--------+---------+
+
+explain (costs false, analyse, buffers) select * from t1 where c1 between 1 and 1000;
+
++-----------------------------------------------------------------------------+
+|QUERY PLAN                                                                   |
++-----------------------------------------------------------------------------+
+|Bitmap Heap Scan on t1 (actual time=1.801..2.806 rows=1000 loops=1)          |
+|  Recheck Cond: ((c1 >= 1) AND (c1 <= 1000))                                 |
+|  Heap Blocks: exact=1000                                                    |
+|  Buffers: shared hit=1002 read=2                                            |
+|  ->  Bitmap Index Scan on t1_c1 (actual time=1.663..1.664 rows=1000 loops=1)|
+|        Index Cond: ((c1 >= 1) AND (c1 <= 1000))                             |
+|        Buffers: shared hit=2 read=2                                         |
+|Planning:                                                                    |
+|  Buffers: shared hit=12 read=2 dirtied=1                                    |
+|Planning Time: 3.439 ms                                                      |
+|Execution Time: 2.911 ms                                                     |
++-----------------------------------------------------------------------------+
+
+explain (costs false, analyse, buffers) select * from t1 where c1 between 1 and 4000;
+
++-----------------------------------------------------------------------------+
+|QUERY PLAN                                                                   |
++-----------------------------------------------------------------------------+
+|Bitmap Heap Scan on t1 (actual time=0.772..2.145 rows=4000 loops=1)          |
+|  Recheck Cond: ((c1 >= 1) AND (c1 <= 4000))                                 |
+|  Heap Blocks: exact=1000                                                    |
+|  Buffers: shared hit=1004 read=8                                            |
+|  ->  Bitmap Index Scan on t1_c1 (actual time=0.637..0.638 rows=4000 loops=1)|
+|        Index Cond: ((c1 >= 1) AND (c1 <= 4000))                             |
+|        Buffers: shared hit=4 read=8                                         |
+|Planning:                                                                    |
+|  Buffers: shared hit=3                                                      |
+|Planning Time: 0.107 ms                                                      |
+|Execution Time: 2.418 ms                                                     |
++-----------------------------------------------------------------------------+
+
+set enable_bitmapscan=off;
+set enable_seqscan=off;
+explain (costs false, analyse, buffers) select * from t1 where c1 between 1 and 4000;
+
++-------------------------------------------------------------------------+
+|QUERY PLAN                                                               |
++-------------------------------------------------------------------------+
+|Index Scan using t1_c1 on t1 (actual time=0.018..2.057 rows=4000 loops=1)|
+|  Index Cond: ((c1 >= 1) AND (c1 <= 4000))                               |
+|  Buffers: shared hit=4012                                               |
+|Planning:                                                                |
+|  Buffers: shared hit=3                                                  |
+|Planning Time: 0.088 ms                                                  |
+|Execution Time: 2.272 ms                                                 |
++-------------------------------------------------------------------------+
+```
+* bitmap index scan 을 사용하면 테이블 블록 액세스를 최소화 할수 있다.
+* bitmap index scan 수행절차
+  * 조건에 만족하는 인덱스키 검색
+  * work_mem 공간내 여유가 있으면 exact 모드 수행
+    * exact 모드는 pageTableEntry 구초제 1개가 블록 1개를 관리한다.
+    * exact 모드는 비트 1개가 레코드 1개를 가르킨다
+  * work_mem 공간내 여유가 없으면 lossy 모드 수행
+    * lossy 모드는 pageTableEntry 구초제 1개가 chunk 1개를 관리한다.
+    * lossy 모드는 비트 1개가 블록 1개를 가리킨다.
+  * 비트맵 작업이 완료 된후 블록 번호순으로 pageTableEntry 를 정렬
+  * exact 모드로 처리된 블록들은 비트맵 정보를 이용해서 레코드 직접 액세스
+  * lossy 모드로 처리된 블록들은 블록을 액세스 하면서 레코드를 찾음
+  * lossy 모드인 경우 블록내 레코드를 스캔하면서 조건에 맞는 레코드를 추출
+
+#### cluster
+
+* cluster 명령어를 사용해서 테이블을 정렬된 상태로 저장
+```postgresql
+cluster t3 using t3_idx01;
+analyze t3;
+```
+* cluster 명령어는 DML, select 와도 호환이 없어 사용자 접속을 막아야 한다.
+* pg_repack 를 사용하면 online 으로 cluster 를 수행할수 있다, 명령어 수행 직후와 완료 직전에만 테이블 exclusive lock 이 걸린다.
+* cluster 작업은 특정 인덱스 기준으로 테이블 레코드를 정렬하는 것이므로 다른 인덱스와 테이블 간의 정렬 상태는 나빠질수 있다.
+
+#### index only scan
+
+* 테이블을 액세스 하지 않고 인덱스 만 앱세스 해서 쿼리를 수행하는 방식
+* 9.2 버전 부터 제공
+* 커버링 인덱스를 이용한 인덱스 스캔방식
+```postgresql
+drop table t3;
+create table t3 (c1 int, c2 int, c3 int, dummy char(100));
+insert into t3 select i, i, i, 'dummy' from generate_series(1, 10000) i;
+
+create index t3_idx on t3(c1, c2);
+analyze t3;
+
+explain (costs false, analyze, buffers)
+select count(*) from t3 where c1 between 1 and 1000 and c2 <> 0;
+
++-------------------------------------------------------------------------------------+
+|QUERY PLAN                                                                           |
++-------------------------------------------------------------------------------------+
+|Aggregate (actual time=0.604..0.605 rows=1 loops=1)                                  |
+|  Buffers: shared hit=3 read=2                                                       |
+|  ->  Index Only Scan using t3_idx on t3 (actual time=0.027..0.484 rows=1000 loops=1)|
+|        Index Cond: ((c1 >= 1) AND (c1 <= 1000))                                     |
+|        Filter: (c2 <> 0)                                                            |
+|        Heap Fetches: 0                                                              |
+|        Buffers: shared hit=3 read=2                                                 |
+|Planning:                                                                            |
+|  Buffers: shared hit=11 read=3                                                      |
+|Planning Time: 1.705 ms                                                              |
+|Execution Time: 0.667 ms                                                             |
++-------------------------------------------------------------------------------------+
+```
+* 커버링 인덱스가 존재하여 index only scan 이 수행됨
+* 그러나 항상 index only scan 이 수행되는것은 아니다.
+
+##### 
