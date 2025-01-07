@@ -1171,6 +1171,7 @@ explain (costs false, analyse, buffers) select * from t1 where c1 between 1 and 
   * lossy 모드인 경우 블록내 레코드를 스캔하면서 조건에 맞는 레코드를 추출
 
 #### cluster
+<hr/>
 
 * cluster 명령어를 사용해서 테이블을 정렬된 상태로 저장
 ```postgresql
@@ -1182,6 +1183,7 @@ analyze t3;
 * cluster 작업은 특정 인덱스 기준으로 테이블 레코드를 정렬하는 것이므로 다른 인덱스와 테이블 간의 정렬 상태는 나빠질수 있다.
 
 #### index only scan
+<hr/>
 
 * 테이블을 액세스 하지 않고 인덱스 만 앱세스 해서 쿼리를 수행하는 방식
 * 9.2 버전 부터 제공
@@ -1216,4 +1218,243 @@ select count(*) from t3 where c1 between 1 and 1000 and c2 <> 0;
 * 커버링 인덱스가 존재하여 index only scan 이 수행됨
 * 그러나 항상 index only scan 이 수행되는것은 아니다.
 
-##### 
+##### index only scan 시 vacuum 필요성
+<hr/>
+
+* index only scan 을 수행 하기 위해선 vacuum 을 수행해야 한다.
+```postgresql
+vacuum t3;
+
++-------------------------------------------------------------------------------------+
+|QUERY PLAN                                                                           |
++-------------------------------------------------------------------------------------+
+|Aggregate (actual time=0.277..0.278 rows=1 loops=1)                                  |
+|  Buffers: shared hit=5                                                              |
+|  ->  Index Only Scan using t3_idx on t3 (actual time=0.024..0.175 rows=1000 loops=1)|
+|        Index Cond: ((c1 >= 1) AND (c1 <= 1000))                                     |
+|        Filter: (c2 <> 0)                                                            |
+|        Heap Fetches: 0                                                              |
+|        Buffers: shared hit=5                                                        |
+|Planning:                                                                            |
+|  Buffers: shared hit=3                                                              |
+|Planning Time: 0.166 ms                                                              |
+|Execution Time: 0.305 ms                                                             |
++-------------------------------------------------------------------------------------+
+```
+```postgresql
+create extension pg_visibility;
+select * from pg_visibility_map_summary('t3');
++-----------+----------+
+|all_visible|all_frozen|
++-----------+----------+
+|182        |0         |
++-----------+----------+
+```
+* index only scan 은 all_visible 가 0 이면 수행하지 않고 vacuum 수행시 비트가 1로 변경되어 index only scan 이 수행된다.
+
+#### Tid scan
+<hr/>
+
+* postgresql 는 레코드마다 "{블록번호, 레코드번호}"로 구성된 CTID 값을 가진다.
+* Tid scan 은 CTID 를 이용한 액세스 방법
+* CTID 값은 테이블 레벨에서 유일한 값이므로 CTID 액세스 방식은 다른 방식보다 빠르다.
+```postgresql
+drop table t4;
+create table t4 (c1 int, c2 int);
+insert into t4 select mod(i, 50), i from generate_series(1, 100) i;
+select ctid, * from t4 limit 2;
++-----+--+--+
+|ctid |c1|c2|
++-----+--+--+
+|(0,1)|1 |1 |
+|(0,2)|2 |2 |
++-----+--+--+
+
+set enable_seqscan = off;
+explain (costs false ,analyse ,buffers )
+select * from t4 where CTID='(0,1)';
++--------------------------------------------------------+
+|QUERY PLAN                                              |
++--------------------------------------------------------+
+|Tid Scan on t4 (actual time=0.026..0.027 rows=1 loops=1)|
+|  TID Cond: (ctid = '(0,1)'::tid)                       |
+|  Buffers: shared hit=1                                 |
+|Planning Time: 0.041 ms                                 |
+|Execution Time: 0.038 ms                                |
++--------------------------------------------------------+
+```
+* tid scan 시 단건 조회
+* 실 사용 시에는 거의 사용되지 않는다.
+
+#### 액세스 제어
+<hr/>
+
+* hint 를 사용해서 액세스 방법을 제어할수 있다.
+* postgresql 은 hint 대신 액세스 on/off 를 사용한다.
+
+|항목|        설명         |
+|:--:|:-----------------:|
+|enable_seqscan| seq scan 사용 여부 제어 |
+|enable_indexscan| index scan 사용 여부 제어 |
+|enable_bitmapscan| bitmap index scan 사용 여부 제어 |
+|enable_indexonlyscan| index only scan 사용 여부 제어 |
+|enable_tidscan| tid scan 사용 여부 제어 |
+
+#### 조인방법
+<hr/>
+
+* postgresql 은 3가지 조인방법을 제공
+  * nested loop join
+  * merge join
+  * hash join
+* 옵티마이저는 통계정보, 인덱스 정보, 히스토그램 정보를 이용해 적절한 조인 방법 선택
+* postgresql 은 정교한 조인 제어 기능은 제공하지 않으나 조인 방법을 제어할수 있는 옵션을 제공
+
+#### nested loop join
+<hr/>
+
+* 첫번째 테이블에서 추출된 레코드들을 이용해서 두번째 테이블로 반복적 엑세스 하는 방법
+* 첫번째 테이블을 outer 테이블(driving table) 이라고 하고 두번째 테이블을 inner 테이블이라고 한다.
+* 루프 횟수 및 inner 테이블에 대한 액세스 효율이 중요하다.
+```postgresql
+drop table t1;
+drop table t2;
+drop table t3;
+create table t1 (c1 int, c2 int, dummy char(1000));
+create table t2 (c1 int, c2 int, dummy char(1000));
+create table t3 (c1 int, c2 int, dummy char(1000));
+
+insert into t1 select i, i, 'dummy' from generate_series(1, 10000) as i;
+insert into t2 select i, i, 'dummy' from generate_series(1, 10000) as i;
+insert into t3 select i, i, 'dummy' from generate_series(1, 1000) as i;
+
+create index t1_c1 on t1(c1);
+create index t2_c1 on t2(c1);
+create index t3_c1 on t3(c1);
+
+analyse t1;
+analyse t2;
+analyse t3;
+
+select relname, relpages from pg_class where relname in ('t1', 't2', 't3');
+
++-------+--------+
+|relname|relpages|
++-------+--------+
+|t1     |1429    |
+|t2     |1429    |
+|t3     |143     |
++-------+--------+
+
+explain (costs false , analyze true, buffers true)
+select * from t1 a, t2 b, t3 c where a.c1 between 1 and 10 and a.c1 = b.c1 and b.c1 = c.c1;
+
++-------------------------------------------------------------------------------------+
+|QUERY PLAN                                                                           |
++-------------------------------------------------------------------------------------+
+|Nested Loop (actual time=0.016..0.055 rows=10 loops=1)                               |
+|  Join Filter: (a.c1 = b.c1)                                                         |
+|  Buffers: shared hit=64                                                             |
+|  ->  Nested Loop (actual time=0.011..0.031 rows=10 loops=1)                         |(3)
+|        Buffers: shared hit=34                                                       |
+|        ->  Index Scan using t1_c1 on t1 a (actual time=0.006..0.009 rows=10 loops=1)|(1)
+|              Index Cond: ((c1 >= 1) AND (c1 <= 10))                                 |
+|              Buffers: shared hit=4                                                  |
+|        ->  Index Scan using t3_c1 on t3 c (actual time=0.001..0.001 rows=1 loops=10)|(2)
+|              Index Cond: (c1 = a.c1)                                                |
+|              Buffers: shared hit=30                                                 |
+|  ->  Index Scan using t2_c1 on t2 b (actual time=0.001..0.002 rows=1 loops=10)      |(4)
+|        Index Cond: (c1 = c.c1)                                                      |
+|        Buffers: shared hit=30                                                       |
+|Planning:                                                                            |
+|  Buffers: shared hit=39                                                             |
+|Planning Time: 0.407 ms                                                              |
+|Execution Time: 0.074 ms                                                             |
++-------------------------------------------------------------------------------------+
+```
+* 수행순서 (1) -> (2) -> (3) -> (4) 순서로 읽는다.
+* 테이블 액세스 순서 T1 -> T3 -> T2
+* t1_c1 인덱스를 이용하여 outer 테이블인 t1 에 엑세스 추출건 10건 루프 횟수 1회
+* t3_c1 인덱스를 이용해 inner 테이블인 t3 테이블 액세스 outer 테이블에서 추출된 건수 10건 이므로 10회 반복
+* t1, t3 간 NL 조인 수행결과 10건 추출
+* t2_c1 인덱스를 이용해 inner 테이블인 t2 액세스 첫번째 루프에서 10건 추출 했으므로 10회 반복
+```postgresql
+explain (costs false)
+select * from t1 a, t2 b, t3 c where a.c1 between 1 and 10 and a.c1 = b.c1 and b.c1 = c.c1 and b.c2 in (10, 20);
+
++----------------------------------------------------+
+|QUERY PLAN                                          |
++----------------------------------------------------+
+|Nested Loop                                         |
+|  Join Filter: (a.c1 = b.c1)                        |
+|  ->  Nested Loop                                   |
+|        ->  Index Scan using t1_c1 on t1 a          |
+|              Index Cond: ((c1 >= 1) AND (c1 <= 10))|
+|        ->  Index Scan using t3_c1 on t3 c          |
+|              Index Cond: (c1 = a.c1)               |
+|  ->  Index Scan using t2_c1 on t2 b                |
+|        Index Cond: (c1 = c.c1)                     |
+|        Filter: (c2 = ANY ('{10,20}'::integer[]))   |
++----------------------------------------------------+
+```
+* t1 -> t2 -> t3 순서로 테이블 액세스
+```postgresql
+explain (costs false)
+select * from t1 a, t2 b, t3 c where a.c1 between 1 and 10 and a.c1 = b.c1 and b.c1+0 = c.c1 and b.c2 in (10, 20) and c.c2 in (10, 20);
+
++-------------------------------------------------------+
+|QUERY PLAN                                             |
++-------------------------------------------------------+
+|Nested Loop                                            |
+|  ->  Nested Loop                                      |
+|        ->  Index Scan using t1_c1 on t1 a             |
+|              Index Cond: ((c1 >= 1) AND (c1 <= 10))   |
+|        ->  Index Scan using t2_c1 on t2 b             |
+|              Index Cond: (c1 = a.c1)                  |
+|              Filter: (c2 = ANY ('{10,20}'::integer[]))|
+|  ->  Index Scan using t3_c1 on t3 c                   |
+|        Index Cond: (c1 = (b.c1 + 0))                  |
+|        Filter: (c2 = ANY ('{10,20}'::integer[]))      |
++-------------------------------------------------------+
+```
+* t1 -> t2 -> t3 순서로 테이블 액세스
+* a.c1 = b.c1 조인후 b.c1 = c.c1 조인으로 a.c1 = c.c1 조인 유추 가능하던것
+* b.c1+0 = c.c1 조인으로 a.c1 = c.c1 조인 유추 불가능
+
+##### materialize
+<hr/>
+
+```postgresql
+set enable_hashjoin = off;
+set enable_mergejoin = off;
+explain (costs false, timing true, analyze true, buffers true)
+select * from t1 a, t2 b where a.c1 between 1 and 10 and a.c2 = b.c2 and b.c2 in (10, 20);
+
++-------------------------------------------------------------------------------+
+|QUERY PLAN                                                                     |
++-------------------------------------------------------------------------------+
+|Nested Loop (actual time=24.512..24.515 rows=1 loops=1)                        |
+|  Join Filter: (a.c2 = b.c2)                                                   |
+|  Rows Removed by Join Filter: 19                                              |
+|  Buffers: shared hit=2 read=1431                                              |
+|  ->  Index Scan using t1_c1 on t1 a (actual time=0.833..0.881 rows=10 loops=1)|
+|        Index Cond: ((c1 >= 1) AND (c1 <= 10))                                 |
+|        Buffers: shared hit=2 read=2                                           |
+|  ->  Materialize (actual time=0.146..2.362 rows=2 loops=10)                   |
+|        Buffers: shared read=1429                                              |
+|        ->  Seq Scan on t2 b (actual time=1.449..23.607 rows=2 loops=1)        |
+|              Filter: (c2 = ANY ('{10,20}'::integer[]))                        |
+|              Rows Removed by Filter: 9998                                     |
+|              Buffers: shared read=1429                                        |
+|Planning:                                                                      |
+|  Buffers: shared hit=6                                                        |
+|Planning Time: 0.290 ms                                                        |
+|Execution Time: 24.540 ms                                                      |
++-------------------------------------------------------------------------------+
+```
+* materialize 는 inner 테이블을 인덱스가 존재하지 않을때 주로 발
+* 조인 순서는 t1 -> t2 순서로 액세스 t2 에 적절한 인덱스가 없어 materialize 를 수행
+* materialize 는 inner 테이블 처리 결과를 temp 테이블에 저장하는 방식 t2 에 seq scan 은 1번만 수행
+* materialize 는 차선택일뿐 explain 결과에 나타나면 조인 조건 칼럼의 인덱스 생성여부 확인 필요
+
+##### inner 테이블 액세스시 bitmap index scan 사용 이유 
