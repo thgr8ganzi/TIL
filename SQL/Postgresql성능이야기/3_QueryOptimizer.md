@@ -1458,3 +1458,281 @@ select * from t1 a, t2 b where a.c1 between 1 and 10 and a.c2 = b.c2 and b.c2 in
 * materialize 는 차선택일뿐 explain 결과에 나타나면 조인 조건 칼럼의 인덱스 생성여부 확인 필요
 
 ##### inner 테이블 액세스시 bitmap index scan 사용 이유 
+<hr/>
+
+```postgresql
+drop table t1;
+drop table t2;
+create table t1 (c1 int, dummy char(100));
+create table t2 (c1 int, dummy char(100));
+-- c1 칼럼 기준 t1, t2 는 1:10000 비율로 데이터 생성
+insert into t1 select i, 'dummy' from generate_series(1, 1000) as i;
+insert into t2 select mod(i, 1000)+1, 'dummy' from generate_series(1, 10000000) as i;
+
+create index t1_idx on t1(c1);
+create index t2_idx on t2(c1);
+
+analyze t1;
+analyze t2;
+
+select relname, reltuples from pg_class where relname in ('t1', 't2');
++-------+---------+
+|relname|reltuples|
++-------+---------+
+|t1     |1000     |
+|t2     |9999997  |
++-------+---------+
+select tablename, attname, correlation from pg_stats where tablename = 't2';
++---------+-------+-------------+
+|tablename|attname|correlation  |
++---------+-------+-------------+
+|t2       |c1     |-0.0013180748|
+|t2       |dummy  |1            |
++---------+-------+-------------+
+
+set enable_hashjoin = off;
+set enable_mergejoin = off;
+explain (costs false ,analyze ,buffers)
+select * from t1 a, t2 b where a.c1 between 1 and 100 and a.c1 = b.c1;
++----------------------------------------------------------------------------------------------------+
+|QUERY PLAN                                                                                          |
++----------------------------------------------------------------------------------------------------+
+|Gather (actual time=18.089..1779.634 rows=1000000 loops=1)                                          |
+|  Workers Planned: 2                                                                                |
+|  Workers Launched: 2                                                                               |
+|  Buffers: shared hit=16601 read=156715                                                             |
+|  ->  Nested Loop (actual time=10.300..1697.191 rows=333333 loops=3)                                |
+|        Buffers: shared hit=16601 read=156715                                                       |
+|        ->  Parallel Seq Scan on t2 b (actual time=0.694..565.041 rows=3333333 loops=3)             |
+|              Buffers: shared hit=15699 read=156715                                                 |
+|        ->  Memoize (actual time=0.000..0.000 rows=0 loops=10000000)                                |
+|              Cache Key: b.c1                                                                       |
+|              Cache Mode: logical                                                                   |
+|              Hits: 3321472  Misses: 1000  Evictions: 0  Overflows: 0  Memory Usage: 80kB           |
+|              Buffers: shared hit=902                                                               |
+|              Worker 0:  Hits: 3322168  Misses: 1000  Evictions: 0  Overflows: 0  Memory Usage: 80kB|
+|              Worker 1:  Hits: 3353360  Misses: 1000  Evictions: 0  Overflows: 0  Memory Usage: 80kB|
+|              ->  Index Scan using t1_idx on t1 a (actual time=0.000..0.000 rows=0 loops=3000)      |
+|                    Index Cond: ((c1 = b.c1) AND (c1 >= 1) AND (c1 <= 100))                         |
+|                    Buffers: shared hit=902                                                         |
+|Planning:                                                                                           |
+|  Buffers: shared hit=26 read=3                                                                     |
+|Planning Time: 11.335 ms                                                                            |
+|Execution Time: 1823.720 ms                                                                         |
++----------------------------------------------------------------------------------------------------+
+
+set enable_hashjoin = off;
+set enable_mergejoin = off;
+set enable_indexscan = off;
+set enable_seqscan = off;
+set enable_bitmapscan = on;
+explain (costs false ,analyze ,buffers)
+select * from t1 a, t2 b where a.c1 between 1 and 100 and a.c1 = b.c1;
++---------------------------------------------------------------------------------------+
+|QUERY PLAN                                                                             |
++---------------------------------------------------------------------------------------+
+|Nested Loop (actual time=77.349..2328.437 rows=1000000 loops=1)                        |
+|  Buffers: shared hit=973510 read=27627 written=1                                      |
+|  ->  Bitmap Heap Scan on t1 a (actual time=0.037..0.464 rows=100 loops=1)             |
+|        Recheck Cond: ((c1 >= 1) AND (c1 <= 100))                                      |
+|        Heap Blocks: exact=2                                                           |
+|        Buffers: shared hit=3 read=1                                                   |
+|        ->  Bitmap Index Scan on t1_idx (actual time=0.013..0.014 rows=100 loops=1)    |
+|              Index Cond: ((c1 >= 1) AND (c1 <= 100))                                  |
+|              Buffers: shared hit=2                                                    |
+|  ->  Bitmap Heap Scan on t2 b (actual time=3.130..21.918 rows=10000 loops=100)        |
+|        Recheck Cond: (a.c1 = c1)                                                      |
+|        Heap Blocks: exact=1000000                                                     |
+|        Buffers: shared hit=973507 read=27626 written=1                                |
+|        ->  Bitmap Index Scan on t2_idx (actual time=0.915..0.915 rows=10000 loops=100)|
+|              Index Cond: (c1 = a.c1)                                                  |
+|              Buffers: shared hit=283 read=850                                         |
+|Planning:                                                                              |
+|  Buffers: shared hit=3                                                                |
+|Planning Time: 0.151 ms                                                                |
+|Execution Time: 2379.459 ms                                                            |
++---------------------------------------------------------------------------------------+
+```
+* NL 조인 성능은 inner 테이블 액세스시 효율과 밀접한 관계
+* inner 테이블 정렬이 불량하면 bitmap index scan 을 사용
+* NL 조인시 bitmap index scan 은 레코드마다 수행하여 버퍼 io 감소가 전혀 없고 index scan 보다 느림
+* pg_prewarm() 을 이용해 주기적으로 혹은 배치 작업 전 테이블 블록을 로딩할수 있다면 bitmap index scan 을 사용하지 않아도 된다.
+* inner 테이블이 정렬되지 않은 상태에서 NL 조인은 index scan 이 유리하다
+
+#### hash join
+<hr/>
+
+* 해시조인은 build 와 probe 단계로 수행한다.
+* build 단계는 첫번째 테이블의 조인컬럼에 해시 함수를 적용해 해시 테이블 자료 구조에 데이터를 입력하는 단계
+* probe 단계는 두번째 테이블을 스캔하면서 조인 칼럼에 같은 해시 함수를 적용하면서 해시 테이블을 검색하는 단계
+* 이때 첫번째 테이블을 build 테이블 두번째 테이블을 probe 테이블이라 한다.
+* 해시테이블 자료 구조는 backend 프로세스 내 work_mem 메모리 내에 생성되므로 일반적으로 작은 테이블을 build 테이블로 선택한다.
+* 해시조인은 in-memory, grace, hybrid 해시 조인으로 구분된다.
+* work_mem 내에서 수행할수 있으면 in-memory 해시조인을 수행하고 그렇지 않으면 grace or hybrid 해시조인을 수행한다.
+* postgresql 은 hybrid 해시조인을 수행한다. probe 테이블의 데이터가 skew 하면 히스토그램을 참고한다.
+
+##### 해시조인 원리
+<hr/>
+
+* 해시 함수(h)를 이용한다.
+* x = Y 이면 hash(x) = hash(y) 이다.
+* h(x) != h(y) 이면 x != y 이다.
+* x !=y 이면 h(x) != h(y) 인것이 가장 이상적
+* x != y 이면 h(x) = h(y) 인것이 해시충돌이다.
+* 해시조인은 equal 조인에만 사용 가능하다.
+
+##### in-memory 해시조인
+<hr/>
+
+* work_mem 내에서 수행할수 있는 해시조인
+```postgresql
+drop table t1;
+drop table t2;
+create table t1 (c1 int, dummy char(10));
+create table t2 (c1 int, dummy char(10));
+
+insert into t1 select i, 'dummy' from generate_series(1, 10) as i;
+insert into t2 select i, 'dummy' from generate_series(1, 1000) as i;
+
+analyze t1;
+analyze t2;
+
+explain (costs false ,analyze ,buffers)
+select * from t1 a, t2 b where a.c1 = b.c1;
+
++-----------------------------------------------------------------------+
+|QUERY PLAN                                                             |
++-----------------------------------------------------------------------+
+|Hash Join (actual time=0.060..0.314 rows=10 loops=1)                   |
+|  Hash Cond: (b.c1 = a.c1)                                             |
+|  Buffers: shared hit=7                                                |
+|  ->  Seq Scan on t2 b (actual time=0.013..0.124 rows=1000 loops=1)    |
+|        Buffers: shared hit=6                                          |
+|  ->  Hash (actual time=0.013..0.013 rows=10 loops=1)                  |
+|        Buckets: 1024  Batches: 1  Memory Usage: 9kB                   |
+|        Buffers: shared hit=1                                          |
+|        ->  Seq Scan on t1 a (actual time=0.004..0.005 rows=10 loops=1)|
+|              Buffers: shared hit=1                                    |
+|Planning:                                                              |
+|  Buffers: shared hit=64                                               |
+|Planning Time: 1.792 ms                                                |
+|Execution Time: 0.347 ms                                               |
++-----------------------------------------------------------------------+
+```
+* buckets: 해시테이블 버킷수 최소 1024
+* batches: in-memory 해시조인 처리한 경우 1 그렇지 않으면 2 이상
+* memory usage: work_mem 메모리 사용량
+
+##### grace, hybrid 해시조인
+<hr/>
+
+* build 테이블이 너무 크면 build 테이블을 여러개의 논리적인 파티션으로 나눈후 build 를 여러번 수행, probe 단계를 여러번 반복해서 읽는다 -> classic 해시조인
+* grace 해시조인은 
+  * build 테이블과 probe 테이블에 동일한 해시 함수 적용 N 개의 논리적 파티션 생성
+  * 위 결과로 build 파티션 N 개, probe 파티션 N 개 생성 후 temporary 테이블스페이스 저장
+  * build 파티션 0과 probe 파티션 0해시조인 이후 n-1 파티션까지 차례로 해시조인
+* grace 해시조인은 probe 테이블에 1회만 액세스 classic 해시조인 보다 빠르나 temporary 테이블스페이스 추가공간 사용
+* hybrid 해시조인은 build 파티션, probe 파티션 0번을 temporary 테이블스페이스에 저장 하지 않고 work_mem 내에 저장하여 수행
+  * build 테이블을 몇개 파티션으로 나눌지 결정
+  * build 테이블 읽고 0번 파티션 해당하는 레코드에 대한 build 수행 나머지 파티션 temporary 테이블스페이스에 저장
+  * probe 테이블 읽고 0번 파티션에 대한 probe 수행 나머지 파티션 temporary 테이블스페이스에 저장
+  * 0번을 build 테이블 0번을 probe 테이블로 해시조인
+  * 이후 다음 파티션을 차례로 해시조인 여러번 해시 조인을 수행하는것을 multi-batch 라고 한다.
+```postgresql
+drop table t1;
+drop table t2;
+create table t1 (c1 int, dummy char(10));
+create table t2 (c1 int, dummy char(10));
+
+insert into t1 select generate_series(1, 100000), 'dummy';
+insert into t2 select mod(generate_series(1, 400000), 100000)+1, 'dummy';
+
+analyze t1;
+analyze t2;
+
+set work_mem ='1MB';
+explain (costs false ,analyze ,buffers)
+select * from t1 a, t2 b where a.c1 = b.c1;
+
++---------------------------------------------------------------------------+
+|QUERY PLAN                                                                 |
++---------------------------------------------------------------------------+
+|Hash Join (actual time=139.433..764.243 rows=400000 loops=1)               |
+|  Hash Cond: (b.c1 = a.c1)                                                 |
+|  Buffers: shared hit=2704, temp read=1605 written=1605                    |
+|  ->  Seq Scan on t2 b (actual time=0.012..32.193 rows=400000 loops=1)     |
+|        Buffers: shared hit=2163                                           |
+|  ->  Hash (actual time=138.585..138.587 rows=100000 loops=1)              |
+|        Buckets: 65536  Batches: 4  Memory Usage: 1661kB                   |
+|        Buffers: shared hit=541, temp written=319                          |
+|        ->  Seq Scan on t1 a (actual time=0.007..9.176 rows=100000 loops=1)|
+|              Buffers: shared hit=541                                      |
+|Planning:                                                                  |
+|  Buffers: shared hit=16                                                   |
+|Planning Time: 3.983 ms                                                    |
+|Execution Time: 783.205 ms                                                 |
++---------------------------------------------------------------------------+
+```
+* build 시 35536 개 버킷생성 1661KB 메모리 사용 4 batch 수행 build 와 probe temp IO 발생
+
+##### skew 데이터 퇴적화(histojoin)
+
+* build input 이 work_mem 초과하여 multi-batch 수행
+* probe 데이터가 skew 되어있을 경우(ex.천만건중 1~9가 100만건 90%)
+* 이런 경우 skew 한 데이터를 temporary 테이블스페이스에 저장하면 대량 temp IO 발생 하여 histojoin 을 사용한다.
+* 히스토그램을 이용한 hybrid 해시조인 이며 MCV(most common value) 를 확인후 MCV 데이터를 별도 해시 버킷에 저장해 temp io 제거
+```postgresql
+drop table t1;
+drop table t2;
+create table t1 (c1 int, dummy char(10));
+create table t2 (c1 int, dummy char(10));
+
+insert into t1 select generate_series(1, 100000), 'dummy';
+insert into t2 select mod(generate_series(1, 9000000), 9)+1, 'dummy';
+insert into t2 select generate_series(10, 1000009), 'dummy';
+
+analyze t1;
+analyze t2;
+
+select most_common_vals from pg_stats where tablename = 't2' and attname = 'c1';
+
++-------------------+
+|most_common_vals   |
++-------------------+
+|{8,7,5,2,6,3,1,4,9}|
++-------------------+
+
+select relpages from pg_class where relname = 't2';
+
++--------+
+|relpages|
++--------+
+|54055   |
++--------+
+
+set work_mem = '1MB';
+explain (costs false ,analyze ,buffers)
+select * from t1 a, t2 b where a.c1 = b.c1;
+set work_mem = '4MB';
+
++-----------------------------------------------------------------------------------------------+
+|QUERY PLAN                                                                                     |
++-----------------------------------------------------------------------------------------------+
+|Hash Join (actual time=197.729..10183.251 rows=9099991 loops=1)                                |
+|  Hash Cond: (b.c1 = a.c1)                                                                     |
+|  Buffers: shared hit=16007 read=38589 dirtied=18796 written=17351, temp read=3527 written=3527|
+|  ->  Seq Scan on t2 b (actual time=0.297..6030.172 rows=10000000 loops=1)                     |
+|        Buffers: shared hit=15751 read=38304 dirtied=18796 written=17351                       |
+|  ->  Hash (actual time=197.361..197.362 rows=100000 loops=1)                                  |
+|        Buckets: 65536  Batches: 4  Memory Usage: 1662kB                                       |
+|        Buffers: shared hit=256 read=285, temp written=319                                     |
+|        ->  Seq Scan on t1 a (actual time=0.228..14.191 rows=100000 loops=1)                   |
+|              Buffers: shared hit=256 read=285                                                 |
+|Planning:                                                                                      |
+|  Buffers: shared hit=16                                                                       |
+|Planning Time: 28.938 ms                                                                       |
+|Execution Time: 10611.550 ms                                                                   |
++-----------------------------------------------------------------------------------------------+
+```
+* temp read=3527 temp write=3527 temp io 발생
+* 기존 테이블 대비 매우 작은 io 발생, skew 최적화 효과
