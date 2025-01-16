@@ -1675,7 +1675,7 @@ select * from t1 a, t2 b where a.c1 = b.c1;
 ```
 * build 시 35536 개 버킷생성 1661KB 메모리 사용 4 batch 수행 build 와 probe temp IO 발생
 
-##### skew 데이터 퇴적화(histojoin)
+##### skew 데이터 촤적화(histojoin)
 
 * build input 이 work_mem 초과하여 multi-batch 수행
 * probe 데이터가 skew 되어있을 경우(ex.천만건중 1~9가 100만건 90%)
@@ -1736,3 +1736,167 @@ set work_mem = '4MB';
 ```
 * temp read=3527 temp write=3527 temp io 발생
 * 기존 테이블 대비 매우 작은 io 발생, skew 최적화 효과
+
+### outer 조인
+<hr/>
+
+* outer 조인은 조인 성공 여부와 무관하게 한쪽 집합의 레코드를 모두 출력하는 방식
+* Postgresql 은 ANSI SQL 표준에 따라 outer 조인을 수행한다.
+```postgresql
+create table t1 (c1 int, dummy char(10));
+create table t2 (c1 int, dummy char(10));
+insert into t1 values (1, 'dummy');
+insert into t2 values (1, 'dummy');
+insert into t1 values (2, 'dummy');
+
+select a.c1, b.c1
+from t1 a left join t2 b on a.c1 = b.c1;
++--+----+
+|c1|c1  |
++--+----+
+|1 |1   |
+|2 |null|
++--+----+
+select a.c1, b.c1
+from t1 a left join t2 b on a.c1 = b.c1 and a.c1 = 1;
++--+----+
+|c1|c1  |
++--+----+
+|1 |1   |
+|2 |null|
++--+----+
+select a.c1, b.c1
+from t1 a left join t2 b on a.c1 = b.c1 and a.c1 = 2;
++--+----+
+|c1|c1  |
++--+----+
+|1 |null|
+|2 |null|
++--+----+
+select a.c1, b.c1
+from t1 a left join t2 b on a.c1 = b.c1
+where a.c1 = 1;
++--+--+
+|c1|c1|
++--+--+
+|1 |1 |
++--+--+
+select a.c1, b.c1
+from t1 a left join t2 b on a.c1 = b.c1
+where a.c1 = 2;
++--+----+
+|c1|c1  |
++--+----+
+|2 |null|
++--+----+
+```
+
+#### NL outer 조인
+<hr/>
+
+* NL outer 조인은 기준 테이블을 항상 먼저 DRiving 한다.
+```postgresql
+drop table t1;
+drop table t2;
+create table t1 (c1 int, c2 int, dummy char(10));
+create table t2 (c1 int, c2 int, dummy char(10));
+
+insert into t1 select i, i, 'dummy' from generate_series(1, 1000000) as i;
+insert into t2 select i, i, 'dummy' from generate_series(1, 1000000) as i;
+
+create index t1_c1 on t1(c1);
+create index t2_c1 on t2(c1);
+
+create unique index t2_uk on t2(c2);
+
+analyze t1;
+analyze t2;
+
+set enable_hashjoin = off;
+set enable_mergejoin = off;
+set enable_bitmapscan = off;
+
+explain (costs false, analyze, buffers)
+select * from t1 a, t2 b
+where a.c1 between 1 and 10
+  and a.c1 = b.c1
+  and b.c2 = 1;
++------------------------------------------------------------------------------+
+|QUERY PLAN                                                                    |
++------------------------------------------------------------------------------+
+|Nested Loop (actual time=0.547..0.638 rows=1 loops=1)                         |
+|  Buffers: shared hit=5 read=3                                                |
+|  ->  Index Scan using t2_uk on t2 b (actual time=0.530..0.531 rows=1 loops=1)|
+|        Index Cond: (c2 = 1)                                                  |
+|        Buffers: shared hit=1 read=3                                          |
+|  ->  Index Scan using t1_c1 on t1 a (actual time=0.010..0.099 rows=1 loops=1)|
+|        Index Cond: ((c1 = b.c1) AND (c1 >= 1) AND (c1 <= 10))                |
+|        Buffers: shared hit=4                                                 |
+|Planning:                                                                     |
+|  Buffers: shared hit=41 read=3 dirtied=1                                     |
+|Planning Time: 2.519 ms                                                       |
+|Execution Time: 0.656 ms                                                      |
++------------------------------------------------------------------------------+
+```
+* t2 테이블을 driving table 로 선택 t2 -> t1 순서로 액세스
+* left join 으로 변경하면 t1 테이블 먼저 driving
+```postgresql
+set enable_material = off;
+explain (costs false, analyze, buffers)
+select * from t1 a left join t2 b on a.c1 = b.c1 and b.c2 = 1
+where a.c1 between 1 and 10;
++-------------------------------------------------------------------------------+
+|QUERY PLAN                                                                     |
++-------------------------------------------------------------------------------+
+|Nested Loop Left Join (actual time=0.017..0.037 rows=10 loops=1)               |
+|  Join Filter: (a.c1 = b.c1)                                                   |
+|  Rows Removed by Join Filter: 9                                               |
+|  Buffers: shared hit=44                                                       |
+|  ->  Index Scan using t1_c1 on t1 a (actual time=0.007..0.010 rows=10 loops=1)|
+|        Index Cond: ((c1 >= 1) AND (c1 <= 10))                                 |
+|        Buffers: shared hit=4                                                  |
+|  ->  Index Scan using t2_uk on t2 b (actual time=0.002..0.002 rows=1 loops=10)|
+|        Index Cond: (c2 = 1)                                                   |
+|        Buffers: shared hit=40                                                 |
+|Planning:                                                                      |
+|  Buffers: shared hit=8                                                        |
+|Planning Time: 0.161 ms                                                        |
+|Execution Time: 0.053 ms                                                       |
++-------------------------------------------------------------------------------+
+```
+* index drop 시 t1 먼저 driving 하여 NL outer 조인 수행
+```postgresql
+drop index t1_c1;
+drop index t2_c1;
+
+explain (costs false, analyze, buffers)
+select * from t1 a left join t2 b on a.c1 = b.c1 and b.c2 = 1
+where a.c1 between 1 and 10;
++---------------------------------------------------------------------------------+
+|QUERY PLAN                                                                       |
++---------------------------------------------------------------------------------+
+|Nested Loop Left Join (actual time=0.230..37.089 rows=10 loops=1)                |
+|  Join Filter: (a.c1 = b.c1)                                                     |
+|  Rows Removed by Join Filter: 9                                                 |
+|  Buffers: shared hit=6410                                                       |
+|  ->  Gather (actual time=0.218..37.056 rows=10 loops=1)                         |
+|        Workers Planned: 2                                                       |
+|        Workers Launched: 2                                                      |
+|        Buffers: shared hit=6370                                                 |
+|        ->  Parallel Seq Scan on t1 a (actual time=13.893..24.881 rows=3 loops=3)|
+|              Filter: ((c1 >= 1) AND (c1 <= 10))                                 |
+|              Rows Removed by Filter: 333330                                     |
+|              Buffers: shared hit=6370                                           |
+|  ->  Index Scan using t2_uk on t2 b (actual time=0.002..0.002 rows=1 loops=10)  |
+|        Index Cond: (c2 = 1)                                                     |
+|        Buffers: shared hit=40                                                   |
+|Planning:                                                                        |
+|  Buffers: shared hit=11 dirtied=1                                               |
+|Planning Time: 9.946 ms                                                          |
+|Execution Time: 37.112 ms                                                        |
++---------------------------------------------------------------------------------+
+```
+* NL 조인은 항상 기준 테이블을 driving 한다.
+
+#### hash outer 조인
+<hr/>
