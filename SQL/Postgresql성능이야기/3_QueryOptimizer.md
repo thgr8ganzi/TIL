@@ -1900,3 +1900,74 @@ where a.c1 between 1 and 10;
 
 #### hash outer 조인
 <hr/>
+
+* 해시조인은 outer 조인시 driving table 을 선택하는것이 중요하다.
+* 기준 집합이 큰 테이블이 build 테이블이 되면 해시테이블 생성시 많은 메모리를 사용하게 되어 성능이 저하된다.
+* outer 조인시 기준집합이 build 테이블이 되는것이 원칙이나 probe input 보다 크면 서로 역활을 바꿔줄수 있다.
+```postgresql
+create table t1 (c1 int, c2 int, dummy char(10));
+create table t2 (c1 int, c2 int, dummy char(10));
+
+insert into t1 select i, i, 'dummy' from generate_series(1, 1000) as i;
+insert into t2 select mod(i, 1000) + 1, i, 'dummy' from generate_series(1, 10000000) as i;
+
+analyze t1;
+analyze t2;
+
+select relname, relpages from pg_class where relname in ('t1', 't2');
++-------+--------+
+|relname|relpages|
++-------+--------+
+|t1     |7       |
+|t2     |63695   |
++-------+--------+
+
+explain (costs false, analyze, buffers)
+select * from t1 a left join t2 b on a.c1 = b.c1;
++-------------------------------------------------------------------------+
+|QUERY PLAN                                                               |
++-------------------------------------------------------------------------+
+|Hash Right Join (actual time=8.538..3354.078 rows=10000000 loops=1)      |
+|  Hash Cond: (b.c1 = a.c1)                                               |
+|  Buffers: shared hit=16100 read=47602                                   |
+|  ->  Seq Scan on t2 b (actual time=0.204..735.129 rows=10000000 loops=1)|
+|        Buffers: shared hit=16100 read=47595                             |
+|  ->  Hash (actual time=8.301..8.302 rows=1000 loops=1)                  |
+|        Buckets: 1024  Batches: 1  Memory Usage: 58kB                    |
+|        Buffers: shared read=7                                           |
+|        ->  Seq Scan on t1 a (actual time=0.664..1.407 rows=1000 loops=1)|
+|              Buffers: shared read=7                                     |
+|Planning:                                                                |
+|  Buffers: shared hit=39                                                 |
+|Planning Time: 1.363 ms                                                  |
+|Execution Time: 3683.000 ms                                              |
++-------------------------------------------------------------------------+
+```
+* 기준 집합인 t1 이 build 테이블
+```postgresql
+explain (costs false, analyze, buffers)
+select * from t2 b left join t1 a on a.c1 = b.c1;
++-------------------------------------------------------------------------+
+|QUERY PLAN                                                               |
++-------------------------------------------------------------------------+
+|Hash Left Join (actual time=7.089..3318.181 rows=10000000 loops=1)       |
+|  Hash Cond: (b.c1 = a.c1)                                               |
+|  Buffers: shared hit=16139 read=47563                                   |
+|  ->  Seq Scan on t2 b (actual time=0.310..731.004 rows=10000000 loops=1)|
+|        Buffers: shared hit=16132 read=47563                             |
+|  ->  Hash (actual time=6.757..6.758 rows=1000 loops=1)                  |
+|        Buckets: 1024  Batches: 1  Memory Usage: 58kB                    |
+|        Buffers: shared hit=7                                            |
+|        ->  Seq Scan on t1 a (actual time=0.010..0.096 rows=1000 loops=1)|
+|              Buffers: shared hit=7                                      |
+|Planning Time: 0.139 ms                                                  |
+|Execution Time: 3643.543 ms                                              |
++-------------------------------------------------------------------------+
+```
+* 큰테이블이 기준이 된경우 작은 테이블인 t1 이 build 테이블로 선택된다.
+* build input 인 t2 를 t1 으로 swap
+
+#### hash left & hash right
+<hr/>
+
+* 
