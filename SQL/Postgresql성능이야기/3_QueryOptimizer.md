@@ -1970,4 +1970,183 @@ select * from t2 b left join t1 a on a.c1 = b.c1;
 #### hash left & hash right
 <hr/>
 
-* 
+* build input swap(build 테이블이 크면 build input 을 작은 테이블로 swap)이 발생한다
+* hash right join 은 기준테이블이 right 즉 build 테이블
+* hash left join 은 기준테이블이 left 즉 probe 테이블
+
+### 쿼리 재작성
+<hr/>
+
+* 사용자가 입력한 쿼리를 옵티마이저가 더 좋은 실행 계획을 수립할수 있는 형태로 변경
+* 종류
+  * 서브쿼리 collapse
+    * 서브쿼리를 메인쿼리에 병합해 조인 유도
+  * view merging
+    * 인라인 뷰를 메인 쿼리 불록에 병합
+  * join predicate push down
+    * view merging 이 불가능할 경우 조인조건을 뷰 내부로 밀어넣는것
+* 룰 기반 옵티마이저 쿼리 재작성이 동작하면 성능이 향상
+
+#### 서브쿼리 collapse
+
+```postgresql
+drop table if exists t1;
+drop table if exists t2;
+
+create table t1 (c1 int, c2 int, dummy char(100));
+create table t2 (c1 int, c2 int, dummy char(100));
+
+insert into t1 select i, i, 'dummy' from generate_series(1, 10000) as i;
+insert into t2 select mod(i, 10000), i, 'dummy' from generate_series(1, 1000000) as i;
+
+create index t1_idx01 on t1 (c1);
+create index t1_idx02 on t1 (c2);
+create index t2_idx01 on t2 (c1);
+
+analyze t1;
+analyze t2;
+
+select relname, relpages from pg_class where relname in ('t1', 't2');
++-------+--------+
+|relname|relpages|
++-------+--------+
+|t1     |173     |
+|t2     |17242   |
++-------+--------+
+```
+* 서브쿼리를 처리하는 3가지 방식
+  * 필터 방식
+  * 세미조인 
+  * 서브쿼리 collapse
+```postgresql
+explain (costs false, analyze, buffers)
+select a.*
+from t1 a
+where a.c2 between 1 and 100
+and exists(select 1 from t2 b where a.c1 = b.c1);
++----------------------------------------------------------------------------------------+
+|QUERY PLAN                                                                              |
++----------------------------------------------------------------------------------------+
+|Nested Loop Semi Join (actual time=0.020..1.334 rows=100 loops=1)                       |
+|  Buffers: shared hit=297 read=8                                                        |
+|  ->  Index Scan using t1_idx02 on t1 a (actual time=0.013..0.048 rows=100 loops=1)     |
+|        Index Cond: ((c2 >= 1) AND (c2 <= 100))                                         |
+|        Buffers: shared hit=4                                                           |
+|  ->  Index Only Scan using t2_idx01 on t2 b (actual time=0.012..0.012 rows=1 loops=100)|
+|        Index Cond: (c1 = a.c1)                                                         |
+|        Heap Fetches: 0                                                                 |
+|        Buffers: shared hit=293 read=8                                                  |
+|Planning:                                                                               |
+|  Buffers: shared hit=47 read=10                                                        |
+|Planning Time: 16.479 ms                                                                |
+|Execution Time: 1.364 ms                                                                |
++----------------------------------------------------------------------------------------+
+```
+* exists 처리시 NL 세미조인 실행
+```postgresql
+explain (costs false, analyze, buffers)
+select a.*
+from t1 a
+where a.c2 between 1 and 100
+  and a.c1 in (select b.c1 from t2 b);
++----------------------------------------------------------------------------------------+
+|QUERY PLAN                                                                              |
++----------------------------------------------------------------------------------------+
+|Nested Loop Semi Join (actual time=0.015..0.210 rows=100 loops=1)                       |
+|  Buffers: shared hit=305                                                               |
+|  ->  Index Scan using t1_idx02 on t1 a (actual time=0.009..0.029 rows=100 loops=1)     |
+|        Index Cond: ((c2 >= 1) AND (c2 <= 100))                                         |
+|        Buffers: shared hit=4                                                           |
+|  ->  Index Only Scan using t2_idx01 on t2 b (actual time=0.001..0.001 rows=1 loops=100)|
+|        Index Cond: (c1 = a.c1)                                                         |
+|        Heap Fetches: 0                                                                 |
+|        Buffers: shared hit=301                                                         |
+|Planning:                                                                               |
+|  Buffers: shared hit=17                                                                |
+|Planning Time: 0.218 ms                                                                 |
+|Execution Time: 0.233 ms                                                                |
++----------------------------------------------------------------------------------------+
+```
+* in 절 처리시 NL 세미조인 실행
+```postgresql
+explain (costs false, analyze, buffers)
+select a.*
+from t1 a
+where a.c2 between 1 and 100
+and exists(select 1 from t2 b where a.c1 = b.c1 offset 0);
++------------------------------------------------------------------------------------------+
+|QUERY PLAN                                                                                |
++------------------------------------------------------------------------------------------+
+|Index Scan using t1_idx02 on t1 a (actual time=0.021..0.396 rows=100 loops=1)             |
+|  Index Cond: ((c2 >= 1) AND (c2 <= 100))                                                 |
+|  Filter: EXISTS(SubPlan 1)                                                               |
+|  Buffers: shared hit=305                                                                 |
+|  SubPlan 1                                                                               |
+|    ->  Index Only Scan using t2_idx01 on t2 b (actual time=0.002..0.002 rows=1 loops=100)|
+|          Index Cond: (c1 = a.c1)                                                         |
+|          Heap Fetches: 0                                                                 |
+|          Buffers: shared hit=301                                                         |
+|Planning:                                                                                 |
+|  Buffers: shared hit=3                                                                   |
+|Planning Time: 0.194 ms                                                                   |
+|Execution Time: 0.469 ms                                                                  |
++------------------------------------------------------------------------------------------+
+```
+* offset 0 추가해서 필터 방식 유도
+```postgresql
+drop index t2_idx01;
+explain (costs false, analyze, buffers)
+select a.*
+from t1 a
+where a.c2 between 1 and 100
+and exists(select 1 from t2 b where a.c1 = b.c1);
++-----------------------------------------------------------------------------------------+
+|QUERY PLAN                                                                               |
++-----------------------------------------------------------------------------------------+
+|Hash Join (actual time=249.096..250.628 rows=100 loops=1)                                |
+|  Hash Cond: (b.c1 = a.c1)                                                               |
+|  Buffers: shared hit=15902 read=1344                                                    |
+|  ->  HashAggregate (actual time=249.035..249.896 rows=10000 loops=1)                    |
+|        Group Key: b.c1                                                                  |
+|        Batches: 1  Memory Usage: 913kB                                                  |
+|        Buffers: shared hit=15898 read=1344                                              |
+|        ->  Seq Scan on t2 b (actual time=0.193..63.739 rows=1000000 loops=1)            |
+|              Buffers: shared hit=15898 read=1344                                        |
+|  ->  Hash (actual time=0.039..0.040 rows=100 loops=1)                                   |
+|        Buckets: 1024  Batches: 1  Memory Usage: 22kB                                    |
+|        Buffers: shared hit=4                                                            |
+|        ->  Index Scan using t1_idx02 on t1 a (actual time=0.008..0.024 rows=100 loops=1)|
+|              Index Cond: ((c2 >= 1) AND (c2 <= 100))                                    |
+|              Buffers: shared hit=4                                                      |
+|Planning:                                                                                |
+|  Buffers: shared hit=14 dirtied=1                                                       |
+|Planning Time: 0.676 ms                                                                  |
+|Execution Time: 250.675 ms                                                               |
++-----------------------------------------------------------------------------------------+
+explain (costs false, analyze, buffers)
+select a.*
+from t1 a
+where a.c2 between 1 and 100
+  and exists(select 1 from t2 b where a.c1 = b.c1 offset 0);
++-----------------------------------------------------------------------------+
+|QUERY PLAN                                                                   |
++-----------------------------------------------------------------------------+
+|Index Scan using t1_idx02 on t1 a (actual time=0.084..0.881 rows=100 loops=1)|
+|  Index Cond: ((c2 >= 1) AND (c2 <= 100))                                    |
+|  Filter: EXISTS(SubPlan 1)                                                  |
+|  Buffers: shared hit=244 read=3                                             |
+|  SubPlan 1                                                                  |
+|    ->  Seq Scan on t2 b (actual time=0.005..0.005 rows=1 loops=100)         |
+|          Filter: (a.c1 = c1)                                                |
+|          Rows Removed by Filter: 50                                         |
+|          Buffers: shared hit=240 read=1                                     |
+|Planning:                                                                    |
+|  Buffers: shared hit=3                                                      |
+|Planning Time: 0.135 ms                                                      |
+|Execution Time: 0.906 ms                                                     |
++-----------------------------------------------------------------------------+
+```
+* offset 0 추가해서 필터 방식 유도
+
+### lateral 인라인 뷰
+
