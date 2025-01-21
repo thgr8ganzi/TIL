@@ -2150,3 +2150,69 @@ where a.c2 between 1 and 100
 
 ### lateral 인라인 뷰
 
+* lateral 인라인 뷰는 postgresql 9.3 부터 지원
+* 조인칼럼을 옆의 뷰로 침투시킨다. 침투된 칼럼값은 상수로 제공되므로 인덱스 이용
+```postgresql
+drop table if exists t1;
+drop table if exists t2;
+drop table if exists t3;
+
+create table t1 (c1 int, dummy char(100));
+create table t2 (c1 int, c2 int, dummy char(100));
+create table t3 (c1 int, c2 int, dummy char(100));
+
+insert into t1 select i, 'dummy' from generate_series(1, 1000000) as i;
+insert into t2 select mod(i, 1000000), i, 'dummy' from generate_series(1, 2000000) as i;
+insert into t3 select mod(i, 2000000), i, 'dummy' from generate_series(1, 4000000) as i;
+
+create unique index t1_uk on t1(c1);
+create unique index t2_uk on t2(c2);
+create unique index t3_uk on t3(c2);
+
+create index t2_c1_index on t2(c1);
+create index t3_c1_index on t3(c1);
+
+analyze t1;
+analyze t2;
+analyze t3;
+select * from t1 a, (select c1, max(c2) c2 from t3 where t3.c1=a.c1 group by c1 ) v1 where a.c1 between 1 and 10;
+[42P01] ERROR: invalid reference to FROM-clause entry for table "a" Detail: There is an entry for table "a", but it cannot be referenced from this part of the query. Hint: To reference that table, you must mark this subquery with LATERAL. Position: 64
+select * from t1 a, lateral (select c1, max(c2) c2 from t3 where t3.c1 = a.c1 group by c1) v1
+where a.c1 between 1 and 10;
++--+----------------------------------------------------------------------------------------------------+--+-------+
+|c1|dummy                                                                                               |c1|c2     |
++--+----------------------------------------------------------------------------------------------------+--+-------+
+|1 |dummy                                                                                               |1 |2000001|
+|2 |dummy                                                                                               |2 |2000002|
+|3 |dummy                                                                                               |3 |2000003|
+|4 |dummy                                                                                               |4 |2000004|
+|5 |dummy                                                                                               |5 |2000005|
+|6 |dummy                                                                                               |6 |2000006|
+|7 |dummy                                                                                               |7 |2000007|
+|8 |dummy                                                                                               |8 |2000008|
+|9 |dummy                                                                                               |9 |2000009|
+|10|dummy                                                                                               |10|2000010|
++--+----------------------------------------------------------------------------------------------------+--+-------+
+```
+* lateral 인라인 뷰를 이용하면 극적인 성능 개선 가능
+
+#### lateral 인라인뷰 left join
+
+```postgresql
+explain(costs false)
+select *
+from t1 a
+left join lateral (select c1, max(c2) c2 from t3 where t3.c1=a.c1 group by c1) v1 on true
+where a.c1 between 1 and 10;
++----------------------------------------------+
+|QUERY PLAN                                    |
++----------------------------------------------+
+|Nested Loop Left Join                         |
+|  ->  Index Scan using t1_uk on t1 a          |
+|        Index Cond: ((c1 >= 1) AND (c1 <= 10))|
+|  ->  GroupAggregate                          |
+|        ->  Index Scan using t3_c1_index on t3|
+|              Index Cond: (c1 = a.c1)         |
++----------------------------------------------+
+```
+* lateral 인라인뷰 이용 left join 수행시 on true 조인조건을 사용
