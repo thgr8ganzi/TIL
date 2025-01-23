@@ -190,3 +190,49 @@ select name, setting from pg_settings where name like 'vacuum%';
 * autovacuum off 로 설정해도 anti-wraparound autovacuum 은 수행
 * XID frozen 작업을 적절한 시점에 수행하지 못하면 DB 를 사용할수 없을정도로 심각
 
+#### autovacuum_freeze_max_age
+<hr/>
+
+```postgresql
+create or replace function insert_t1 (v1 int) returns void as $$
+begin
+    perform dblink('myconn', 'insert into t1 select ' || '''' || v1 || '''');
+end;
+$$ language plpgsql;
+
+create or replace function loop_insert_t1 (v_begin int, v_end int) returns void as $$
+begin
+    for i in v_begin..v_end loop
+        perform insert_t1(i);
+    end loop;
+end;
+$$ language plpgsql;
+
+create extension pg_visibility;
+create extension dblink;
+
+drop table txid_bump_t;
+create table txid_bump_t (c1 int);
+
+drop table t1;
+create table t1 (c1 int, dummy char(1000));
+select dblink_connect('myconn', 'dbname=mydb port=5432 user=user password=password');
++--------------+
+|dblink_connect|
++--------------+
+|OK            |
++--------------+
+select loop_insert_t1(1, 200000);
+select 'TABLE' || relname as name, age(relfrozenxid)
+from pg_class where relname = 't1'
+union all
+select 'REC(t1)'||c1 as name, age(xmin) from t1 limit 3;
++--------+------+
+|name    |age   |
++--------+------+
+|TABLEt1 |200002|
+|REC(t1)1|200002|
+|REC(t1)2|200001|
++--------+------+
+select pid, query from pg_stat_activity;
+```
