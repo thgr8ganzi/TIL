@@ -236,3 +236,104 @@ select 'REC(t1)'||c1 as name, age(xmin) from t1 limit 3;
 +--------+------+
 select pid, query from pg_stat_activity;
 ```
+
+### visibility map
+<hr/>
+
+* MVCC 특성때문에 필요한 오브젝트
+* visibility map 은 테이블의 블록별 레코드의 가시성 여부를 관리
+* 테이블 블록당 2비트로 구성
+* all_visible
+  * 블록내 모든 레코드가 모든 트랙잭션을 볼수있는 visible 상태면 1 그렇지 않으면 0
+  * vacuum 직후 all_visible 이 1 로 변경 그 후 레코드가 1건이라도 변경 되면 0 으로 변경
+  * index only scan 방식을 수행하려면 all_visible 이 1 이어야 함
+* all_frozen
+  * 블록내 모든 레코드가 frozen 이면 1 아니면 0
+  * 다음 frozen 작업시에 all_frozen 비트가 0인 블록만 처리
+  * all_frozen 비트로 vacuum 성능향상
+
+### HOT(heap only tuple)
+<hr/>
+
+* MVCC 모델의 약점을 극복하기 위한 튜닝기법
+* MVCC 는 이전 레코드를 테이블 블록내에 저장하는것인데 이를 위해 update -> delete & insert 방식으로 동작
+* HOT 은 변경되는 칼럼이 인덱스 칼럼이 아니면 테이블 레코드만 변경(delete & insert)한다.
+* 즉 인덱스는 변경하지 않고 테이블내 이전 레코드가 현재 레코드를 가리키도록한다. 이를 hot chain 이라고 한다.
+* 만약 같은 레코드를 수차례 변경하면 hot chain 이 길어지는데 이때 hot chain pruning 이 발생
+* HOT 은 변경된 레코드가 이전 레코드와 같은 블록에 저장할때만 동작
+* 다른 블록에 저장하려면 FILLFACTOR 를 조정하여 HOT 이 동작하도록 유도
+```postgresql
+drop table t1;
+create table t1(c1 int, c2 int) with (fillfactor = 10);
+
+insert into t1 values (1, 1);
+insert into t1 select i, i from generate_series(100, 200)i;
+
+create index t1_index on t1(c1);
+analyze t1;
+
+select pg_class.relname, pg_class.relpages from pg_class where relname = 't1';
++-------+--------+
+|relname|relpages|
++-------+--------+
+|t1     |5       |
++-------+--------+
+CREATE EXTENSION pageinspect;
+select lp, lp_off, t_xmin, t_xmax, t_ctid, t_data from heap_page_items(get_raw_page('t1', 0)) where lp=1;
++--+------+------+------+------+------------------+
+|lp|lp_off|t_xmin|t_xmax|t_ctid|t_data            |
++--+------+------+------+------+------------------+
+|1 |8160  |200844|0     |(0,1) |0x0100000001000000|
++--+------+------+------+------+------------------+
+select lp, lp_off, t_xmin, t_xmax, t_ctid, t_data from heap_page_items(get_raw_page('t1_index', 1)) where lp=1;
++--+------+------+------+------+------+
+|lp|lp_off|t_xmin|t_xmax|t_ctid|t_data|
++--+------+------+------+------+------+
+|1 |8160  |null  |null  |null  |null  |
++--+------+------+------+------+------+
+update t1 set c2 = 2 where c1 = 1;
+select lp, lp_off, t_xmin, t_xmax, t_ctid, t_data from heap_page_items(get_raw_page('t1', 0)) where lp in (1, 23);
++--+------+------+------+------+------------------+
+|lp|lp_off|t_xmin|t_xmax|t_ctid|t_data            |
++--+------+------+------+------+------------------+
+|1 |8160  |200844|200855|(0,23)|0x0100000001000000|
+|23|7456  |200855|0     |(0,23)|0x0100000002000000|
++--+------+------+------+------+------------------+
+```
+* 1차 변경후 lp(line pointer) 23 을 가르키는 hot chain 생성
+```postgresql
+update t1 set c2 = 3 where c1 = 1;
+select lp, lp_off, t_xmin, t_xmax, t_ctid, t_data from heap_page_items(get_raw_page('t1', 0)) where lp in (1, 23, 24);+--+------+------+------+------+------------------+
+|lp|lp_off|t_xmin|t_xmax|t_ctid|t_data            |
++--+------+------+------+------+------------------+
+|1 |23    |null  |null  |null  |null              |
+|23|7488  |200855|200856|(0,24)|0x0100000002000000|
+|24|7456  |200856|0     |(0,24)|0x0100000003000000|
++--+------+------+------+------+------------------+
+```
+* 2차 변경후 lp(1) 은 offset 칼럼을 이용해 lp(23)을 가르키면 모두 null 로 변경
+* 이를 통해 hot chain 이 짧게 유지하려는 특성 확인
+```postgresql
+update t1 set c2 = 4 where c1 = 1;
+select lp, lp_off, t_xmin, t_xmax, t_ctid, t_data from heap_page_items(get_raw_page('t1', 0)) where lp in (1, 23, 24, 25);
++--+------+------+------+------+------------------+
+|lp|lp_off|t_xmin|t_xmax|t_ctid|t_data            |
++--+------+------+------+------+------------------+
+|1 |24    |null  |null  |null  |null              |
+|23|7456  |200857|0     |(0,23)|0x0100000004000000|
+|24|7488  |200856|200857|(0,23)|0x0100000003000000|
++--+------+------+------+------+------------------+
+```
+* 3차 변경후 HOT chain 은 길어지지 않고 lp(23) 재사용
+```postgresql
+select count(*) from t1;
+select lp, lp_off, t_xmin, t_xmax, t_ctid, t_data from heap_page_items(get_raw_page('t1', 0)) where lp in (1, 23, 24, 25);
++--+------+------+------+------+------------------+
+|lp|lp_off|t_xmin|t_xmax|t_ctid|t_data            |
++--+------+------+------+------+------------------+
+|1 |23    |null  |null  |null  |null              |
+|23|7488  |200857|0     |(0,23)|0x0100000004000000|
++--+------+------+------+------+------------------+
+```
+* 스캔 후 single page vacuum 이 수행되어 lp(24) 삭제
+* fillfactor 를 비율에 따라 페이지 블록에 몇퍼센트 까지 채울지 정해지고 낮을수록 초기 공간은적은 대신 HOT 이 더 잘 동작
